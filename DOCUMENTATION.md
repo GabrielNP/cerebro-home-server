@@ -738,6 +738,16 @@ In the Pi-hole dashboard, queries from your devices should start appearing.
     - /srv/data/containers/npm/letsencrypt → /data/letsencrypt inside the container: Let's Encrypt certificates (not used for .lan)
     - Docker itself (/data/docker: images, layers, cache) stays on the container disk (SSD). It can always be downloaded again.
 
+5. Start on boot
+
+    NPM is the single entry point for every service (`*.lan` → 192.168.1.13): if it's down, no service is reachable by name.
+
+    ```bash
+    pct set 102 --onboot 1
+    ```
+
+    Or in the GUI: *102 (npm)* > *Options* > *Start at boot* > Yes.
+
 ### Install service
 
 1. Enter the container
@@ -1181,12 +1191,12 @@ Take a backup before doing this: `vzdump 101 --storage data-hdd --mode snapshot 
 
 - [x] **Fix the Proxmox repository on the host** (2026-11-17). `pve-no-subscription.list` pointed to `bookworm` (Proxmox 8) while the host runs Proxmox 9 (`trixie`), so Proxmox packages were never updated. Replaced by `/etc/apt/sources.list.d/proxmox.sources` (trixie), then `apt full-upgrade` (9.1 → 9.2).
 - [ ] Reboot the host to load the new kernel installed by the upgrade (6.17.2 → 7.0.14, the new default in Proxmox 9.2). If something breaks, pick `6.17.13` in the boot menu and pin it with `proxmox-boot-tool kernel pin 6.17.13-21-pve`.
-- [ ] Decide whether NPM (102) should start on boot (`pct set 102 --onboot 1`). Today it doesn't, so after the 2026-11-08 reboot it stayed stopped.
+- [x] Set NPM (102) to start on boot (2026-11-17). Before, it stayed stopped after every host reboot.
 - [x] Add `nofail` to the `/srv/data` line in the host's `/etc/fstab` (2026-11-17).
 - [x] Run `pvesm set data-hdd --is_mountpoint yes` on the host (2026-11-17).
 - [x] Clean up leftovers on the HDD from earlier attempts (2026-11-17): `/srv/data/containers/npm/` (~19GB old Docker data), `/srv/data/npm/`, `/srv/data/containers/seafile/`.
 - [x] Move NPM data to the HDD, `/srv/data/containers/npm/{data,letsencrypt}` with bind mounts (2026-11-17).
-- [ ] Delete the pre-migration copies inside LXC 102 once NPM is confirmed working: `pct exec 102 -- rm -rf /data/npm.pre-hdd /data/letsencrypt.pre-hdd`.
+- [x] Delete the pre-migration copies inside LXC 102 (`/data/npm.pre-hdd`, `/data/letsencrypt.pre-hdd`) after confirming NPM works (2026-11-17).
 
 ### Services
 
