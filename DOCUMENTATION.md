@@ -6,28 +6,28 @@
 
 * [Introduction](#introduction)
 * |__[Objective](#objective)
-* |__[Architecture - General]()
-* |__[Architecture - Layers]()
-* [Storage]()
-* [IP Addressing]()
-* [DNS (Pi-hole)]()
-* [Reverse Proxy (Nginx Proxy Manager)]()
-* [External Access (Cloudflare)]()
-* [Vaultwarden]()
-* [Seafile – Correct Decisions]()
-* [Seafile – Docker Compose (Correct Model)]()
-* [Nginx Proxy Manager – Seafile]()
-* [Identified Errors and Lessons Learned]()
-* [Backups (Planning)]()
-* [Final Stable State]()
-* [Hypervisor Proxmox VE]()
-* [Prerequisites:]()
-* [Dependencies:]()
-* [Installation]()
-* [Configuration]()
-* [Adjust repositories]()
-* [Register storage]()
-* [Folder structure]()
+* |__[Architecture - General](#architecture---general)
+* |__[Architecture - Layers](#architecture---layers)
+* |__[Storage](#storage)
+* |__[IP Addressing](#ip-addressing)
+* |__[DNS (Pi-hole)](#dns-pi-hole)
+* |__[Reverse Proxy (Nginx Proxy Manager)](#reverse-proxy-nginx-proxy-manager)
+* |__[External Access (Cloudflare)](#external-access-cloudflare)
+* |__[Target State (goal)](#target-state-goal)
+* [Hypervisor Proxmox VE](#hypervisor-proxmox-ve)
+* |__[Prerequisites](#prerequisites) / [Dependencies](#dependencies)
+* |__[Installation](#installation)
+* |__[Configuration](#configuration)
+* |__[Adjust repositories](#adjust-repositories)
+* |__[Register storage](#register-storage)
+* |__[Folder structure](#folder-structure)
+* |__[Virtualization (standard LXC procedure)](#virtualization)
+* [Pi-hole](#pi-hole)
+* [NPM - Nginx Proxy Manager](#npm---nginx-proxy-manager)
+* [Certificates (internal HTTPS)](#certificates-internal-https)
+* [Vaultwarden](#vaultwarden)
+* [Seafile](#seafile)
+* [TODOs](#todos)
 
 
 ## Introduction
@@ -38,11 +38,11 @@ This document describes, in a consolidated manner, all the architecture decision
 
 ### Architecture - General
 
-* Hypervisor: Proxmox VE (host called 'pve')  
-* Model: 1 physical host + multiple LXC containers  
-* Network: LAN 192.168.1.0/24  
-* Local DNS: Pi-hole  
-* Reverse Proxy: Nginx Proxy Manager (NPM)  
+* Hypervisor: Proxmox VE 9 (host called 'pve'), Debian 13 "trixie"
+* Model: 1 physical host + multiple LXC containers
+* Network: LAN 192.168.1.0/24
+* Local DNS: Pi-hole
+* Reverse Proxy: Nginx Proxy Manager (NPM)
 * Main services: Vaultwarden, Pi-hole, Seafile, Immich
 
 ### Architecture - Layers
@@ -56,154 +56,103 @@ This document describes, in a consolidated manner, all the architecture decision
 
 ### Storage
 
-* SSD Disk (~240GB) - sda: used for Proxmox system and LXC containers  
-* HDD Disk (~1TB) - sdb: used for persistent data and logs
-* ext4 instead of ZFS  
-* HDD mounted on host at /srv/data  
-* Standard structure: /srv/data/containers/<service>  
-* Bind-mount from host to LXC mounted as /data inside the container
+* SSD Disk (~240GB) - sda: used for Proxmox system and LXC root disks (`local-lvm`)
+* HDD Disk (~1TB) - sdb: used for persistent data and logs (`data-hdd`)
+* ext4 instead of ZFS
+* HDD mounted on host at /srv/data
+* Standard structure: /srv/data/containers/<service>
+* Bind-mount from host to LXC (usually mounted as /data inside the container)
 
 #### Logs
 
-- Logs should be directed to sdb (1TB HDD), avoiding overloading sda (240GB SSD).
-- Standardize this by creating volumes mounted at /srv/data/containers/<name>
+- **Premise:** logs should go to sdb (1TB HDD), avoiding overloading sda (240GB SSD).
+- Standardize this by sending each service's logs to its folder under /srv/data/containers/<name>.
+- Pi-hole, Vaultwarden and NPM don't follow this yet (see [TODOs](#todos)). Every new service (Seafile, Immich, ...) must follow it from the start.
 
 ### IP Addressing
 
-- Proxmox Host (pve): 192.168.1.10  
-- Pi-hole: 192.168.1.11  
-- Vaultwarden: 192.168.1.12  
-- Nginx Proxy Manager: 192.168.1.13  
-- Seafile: 192.168.1.14  
-- IPs defined outside DHCP range to avoid conflicts
+- Proxmox Host (pve): 192.168.1.10
+- Pi-hole: 192.168.1.11
+- Vaultwarden: 192.168.1.12
+- Nginx Proxy Manager: 192.168.1.13
+- Seafile: 192.168.1.14 (planned)
+- IPs defined outside the router's DHCP range to avoid conflicts
 
 ### DNS (Pi-hole)
 
-- Pi-hole configured as primary DNS on the network  
-- Local records:  
-  vault.lan -> 192.168.1.13  
-  seafile.lan -> 192.168.1.13  
+- Pi-hole configured as primary DNS on the network
+- Local records:
+  vault.lan -> 192.168.1.13
+  seafile.lan -> 192.168.1.13
 - Reason: all access goes through the reverse proxy
 
 ### Reverse Proxy (Nginx Proxy Manager)
 
-- Running in a dedicated LXC  
-- Default port: 80/443  
-- Responsible for all internal HTTPS  
-- Self-signed internal certificates (OpenSSL)  
+- Running in a dedicated LXC
+- Ports: 80/443 (proxy), 81 (admin panel)
+- Responsible for all internal HTTPS
+- Self-signed internal certificates (OpenSSL), see [Certificates](#certificates-internal-https)
 - Let's Encrypt NOT used for .lan domains
 
-### External Access (Cloudflare) {#external-access-(cloudflare)}
+### External Access (Cloudflare)
 
 - Not yet configured. To be done in the future.
 
-### Vaultwarden
+### Target State (goal)
 
-- Running via Docker inside LXC  
-- Access only via domain (vault.lan)  
-- HTTPS mandatory  
-- Access via IP stops working after HTTPS (expected behavior)  
-- WebCrypto works correctly only under HTTPS
+This is the state the project aims for. It is **not** the current state.
 
-### Seafile – Correct Decisions
-
-- Running via Docker Compose inside dedicated LXC  
-- Database: MariaDB in separate container  
-- Persistent data in /data/seafile  
-- External access ONLY via NPM  
-- Never access Seafile via IP after setting domain  
-- Definitive URLs defined from first boot
-
-### Seafile – Docker Compose (Correct Model)
-
-Components:  
-- seafile (internal port 80 / seahub 8000 / fileserver 8082)  
-- seafile-db (MariaDB)  
-- Critical variables:  
-  SEAFILE_SERVER_HOSTNAME=seafile.lan  
-  SEAFILE_SERVER_PROTOCOL=https  
-  SERVICE_URL=https://seafile.lan  
-  FILE_SERVER_ROOT=https://seafile.lan/seafhttp
-
-### Nginx Proxy Manager – Seafile
-
-- Forward Hostname: seafile.lan  
-- Forward IP: 192.168.1.14  
-- Forward Port: 80  
-- Websockets: enabled  
-- SSL: internal certificate  
-- Custom Nginx Configuration:  
-  location /seafhttp/ -> fileserver  
-  location / -> seahub
-
-### Identified Errors and Lessons Learned
-
-- Never change domain/protocol after Seafile's first boot  
-- Don't mix Seafile's internal HTTPS with NPM's HTTPS  
-- Don't use incorrect rewrite on /seafhttp  
-- CSRF is a symptom of URL inconsistency, not the cause  
-- Bad Gateway usually indicates wrong port  
-- Broken upload usually indicates incorrect FILE_SERVER_ROOT
-
-### Backups (Planning)
-
-- Not yet implemented  
-- Future strategy:  
-  - LXC Snapshot  
-  - Backup to additional dedicated disk
-
-### Final Stable State
-
-- Pi-hole working as DNS  
-- Vaultwarden accessible via HTTPS  
-- Seafile accessible via HTTPS with upload and sync working  
-- NPM as single entry point  
-- Persistent data on HDD
+- Pi-hole working as DNS
+- Vaultwarden accessible via HTTPS
+- Seafile accessible via HTTPS with upload and sync working
+- NPM as single entry point
+- Persistent data and logs on HDD
+- Scheduled backups
 
 ## Hypervisor Proxmox VE
 
 ### Prerequisites:
 
-* Complete and tested backup of sda  
+* Complete and tested backup of sda
 * Accept that the installation disk (sda) will be completely erased
 
 ### Dependencies:
 
-* Proxmox bootable image  
-* USB pen drive  
+* Proxmox bootable image
+* USB pen drive
 * Hardware virtualization
 
-1. Download correct Proxmox VE (Virtual Environment) image.  
-2. Identify the pen drive  
+1. Download correct Proxmox VE (Virtual Environment) image.
+2. Identify the pen drive
     ```bash
     lsblk -o NAME,SIZE,MODEL
     ```
 
-3. Unmount the pen drive (pen drive identified as sdc)  
+3. Unmount the pen drive (pen drive identified as sdc)
    ```bash
    sudo umount /dev/sdc*
    ```
 
-4. Burn the ISO  
+4. Burn the ISO
    ```bash
    sudo dd if=proxmox-ve.iso of=/dev/sdc bs=4M status=progress oflag=sync
    ```
 
-5. Enable hardware virtualization in BIOS/UEFI.    
-   Depending on the manufacturer, look for:  
-   
-   For Intel  
-    * Intel Virtualization Technology  
-    * VT-x  
-    * VT-d (also enable if present)  
-  
-    For AMD  
-    * SVM Mode  
-    * AMD-V  
-      Usually located in:  
-        * Advanced  
-        * Advanced BIOS Features  
-        * CPU Configuration  
+5. Enable hardware virtualization in BIOS/UEFI.
+   Depending on the manufacturer, look for:
+
+   For Intel
+    * Intel Virtualization Technology
+    * VT-x
+    * VT-d (also enable if present)
+
+    For AMD
+    * SVM Mode
+    * AMD-V
+      Usually located in:
+        * Advanced
+        * Advanced BIOS Features
+        * CPU Configuration
         * Northbridge / Chipset
 
 ### Installation
@@ -212,9 +161,9 @@ When you boot from the Proxmox pen drive, you will see one of these initial scre
 
 Usually something like:
 
-* Install Proxmox VE (Graphical)  
-* Install Proxmox VE (Terminal UI)  
-* Advanced Options  
+* Install Proxmox VE (Graphical)
+* Install Proxmox VE (Terminal UI)
+* Advanced Options
 * Rescue Boot
 
 Choose: Install Proxmox VE (Graphical)
@@ -227,7 +176,7 @@ Accept the location and keyboard configuration, and root password definition.
 
 In network configuration, the choice of network interface should match your physical network card driver. In my case:
 
-* nic0 - something that looks like a hexadecimal (r8169)  
+* nic0 - something that looks like a hexadecimal (r8169)
 * nic1 - hexadecimal (cdc_ncm)
 
 In this case, nic1 was the USB interface and not the network card.
@@ -236,76 +185,96 @@ Still on the same screen, the hostname should already be filled in. "pve.lan" is
 
 Also define a fixed IP outside your router's DHCP range. Ex:
 
-* IP: 192.168.1.10  
-* Gateway: 192.168.1.1  
-* Netmask: 255.255.255.0  
+* IP: 192.168.1.10
+* Gateway: 192.168.1.1
+* Netmask: 255.255.255.0
 * DNS: 192.168.1.1
 
 Proceed to complete the installation. It should take a few minutes. When done, it will ask you to reboot or will reboot on its own. Remove the pen drive. After boot, the screen will show something like:
 
->You can now connect to the Proxmox VE web interface:  
+>You can now connect to the Proxmox VE web interface:
 >https://192.168.1.10:8006
 
 No graphical interface, only maintenance terminal. You can log in through the server terminal with the root user and the password defined during installation, but it is recommended to access this address from another device on the network and start configuration through the GUI.
 
 ### Configuration
 
-1. Go to another device  
-2. Open the browser  
-3. Access: https://192.168.1.10:8006  
-4. Ignore the certificate warning (normal)  
-5. Log in with:  
-   user: root  
+1. Go to another device
+2. Open the browser
+3. Access: https://192.168.1.10:8006
+4. Ignore the certificate warning (normal)
+5. Log in with:
+   user: root
    password: the one you created
 
 Basic system state:
 
-Datacenter  
+Datacenter
 └── pve
 
 Click on *pve* and then the *Summary* tab. Confirm resources like CPU and memory and uptime.
 
 #### Adjust repositories
 
-By default, Proxmox uses "enterprise" (paid) repositories. Let's change to free repositories.
+By default, Proxmox uses "enterprise" (paid) repositories. Let's change to the free "no-subscription" repository.
+
+> Proxmox VE 9 is based on Debian 13 **trixie**. Proxmox VE 8 was based on Debian 12 **bookworm**. The repository must match the Proxmox version, otherwise Proxmox packages are never updated.
+
+**Option A - GUI (recommended)**
+
+1. Click on *pve* > *Updates* > *Repositories*
+2. Select the `pve-enterprise` repository and click *Disable*
+3. Select the `ceph` enterprise repository (if present) and click *Disable*
+4. Click *Add*, choose *No-Subscription* and click *Add*
+
+**Option B - Shell**
 
 Click on *pve* and then *shell*. Run the following commands.
 
-To disable enterprise repository:
+Disable the enterprise repositories by renaming the files:
 
 ```bash
-mv /etc/apt/sources.list.d/pve-enterprise.sources /etc/apt/sources.list.d/
+mv /etc/apt/sources.list.d/pve-enterprise.sources /etc/apt/sources.list.d/pve-enterprise.sources.disabled
+mv /etc/apt/sources.list.d/ceph.sources /etc/apt/sources.list.d/ceph.sources.disabled
 ```
 
-Add no-subscription repository:
+Add the no-subscription repository:
 
 ```bash
-nano /etc/apt/sources.list.d/pve-no-subscription.list
+nano /etc/apt/sources.list.d/proxmox.sources
 ```
 
 Add to the file:
 
-```bash
-deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription
+```ini
+Types: deb
+URIs: http://download.proxmox.com/debian/pve
+Suites: trixie
+Components: pve-no-subscription
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
 ```
 
 Save and exit.
 
-Run to update and upgrade:
+**Both options:** update and upgrade:
 
 ```bash
 apt update && apt full-upgrade -y
 ```
 
-This ensures you are in the free repository and receive regular updates.
+Confirm that Proxmox packages come from the trixie repository:
 
-You may get some unauthorized error, which means proxmox still tries to access some enterprise repository.
+```bash
+apt-cache policy pve-manager
+```
 
-Search with:
+The `Candidate` version should be 9.x, coming from `trixie/pve-no-subscription`.
+
+If you get an "unauthorized" (401) error, Proxmox still tries to access an enterprise repository. Search with:
 
 `grep -r "enterprise.proxmox.com" /etc/apt/`
 
-If anything appears, we need to disable it. Rename by adding ".disabled" to the end of the filename. Run the update and upgrade commands again.
+If anything appears in an active file, disable it by adding ".disabled" to the end of the filename. Run the update and upgrade commands again.
 
 #### Register storage
 
@@ -337,7 +306,7 @@ lsblk
 
 You should see something like:
 
-> sdb  
+> sdb
 └─sdb1 1T
 
 5) Create ext4 filesystem:
@@ -346,7 +315,7 @@ You should see something like:
 mkfs.ext4 -L data /dev/sdb1
 ```
 
-* -L data creates a useful label  
+* -L data creates a useful label
 * ext4 is simple, stable and ideal for this case
 
 6) Create mount point:
@@ -355,7 +324,7 @@ mkfs.ext4 -L data /dev/sdb1
 mkdir -p /srv/data
 ```
 
-This doesn't create anything on sda, just a logical directory.
+This doesn't create anything on sdb, just an empty directory on the system disk that will be used as mount point.
 
 7) Temporarily mount HDD (test):
 
@@ -369,11 +338,13 @@ If something like below appears when running `df -h | grep data` it means it wor
 
 8) Permanently mount HDD:
 
-Get UUID with blkid /dev/sdb1
+Get UUID with `blkid /dev/sdb1`
 
 Edit fstab with `nano /etc/fstab` and add at the end
 
-> UUID=xxxx-xxxx-xxxx  /srv/data  ext4  defaults  0  2
+> UUID=xxxx-xxxx-xxxx  /srv/data  ext4  defaults,nofail  0  2
+
+* `nofail` → if the HDD is missing or broken, the server still boots (without it, boot stops in emergency mode and you lose remote access to Proxmox).
 
 Save and exit.
 
@@ -397,15 +368,24 @@ In the web panel go to Datacenter > Storage > Add > Directory
 
 Fill in:
 
-* Id: data-hdd  
-* Directory: /srv/data  
-* Content: check  
-  * Disk image  
-  * Container  
-  * Backup  
+* Id: data-hdd
+* Directory: /srv/data
+* Content: check
+  * Disk image
+  * Container
+  * Backup
 * Nodes: pve
 
 Save.
+
+11) Tell Proxmox that /srv/data must be a mounted disk (shell only, there is no GUI option):
+
+```bash
+pvesm set data-hdd --is_mountpoint yes
+```
+
+* Because of `nofail`, the server can boot without the HDD. In that case /srv/data is just an empty folder on the SSD.
+* With `is_mountpoint`, Proxmox marks data-hdd as unavailable instead of silently writing backups and disks into that folder (which would fill the SSD).
 
 Verify that data-hdd storage appears in the list, is enabled:yes and has no alerts or errors in red.
 
@@ -417,12 +397,18 @@ Up to here we integrated a data disk (sdb) and have a disk (sda) isolated for sy
 
 This creates:
 
-* backups → Proxmox and services backups  
-* containers → persistent LXC data  
-* media → Plex / Immich  
+* backups → services backups (Proxmox backups go to `dump/`, see below)
+* containers → persistent LXC data
+* media → Plex / Immich
 * services → configs (Pi-hole, Vaultwarden, etc.)
 
-2) Verify they were created: 
+Proxmox creates these folders itself, because data-hdd is registered with content Disk image, Container and Backup:
+
+* dump → Proxmox backups (vzdump)
+* images → VM disks
+* private → LXC root disks stored on data-hdd
+
+2) Verify they were created:
 
 ```bash
 ls -l /srv/data
@@ -440,7 +426,7 @@ The chosen option, as mentioned in the architecture and the introduction proposa
 
 Click on Templates
 
-Download `debian-12-standard_*.tar.zst`. Wait for it to finish.
+Download `debian-12-standard_*.tar.zst` (currently `debian-12-standard_12.12-1_amd64.tar.zst`). Wait for it to finish.
 
 2) Create the container.
 
@@ -450,58 +436,63 @@ Fill in:
 
 General Tab
 
-* CT ID: <id usually starting from 100>  
-* Hostname: <service name>  
-* Password  
-* SSH public key: <leave empty>  
-  
+* CT ID: <id, LXCs use 1xx (100, 101, ...)>
+* Hostname: <service name>
+* Unprivileged container: <checked, unless the service section says otherwise>
+* Nesting: <checked, required for Docker and for Debian 12 systemd>
+* Password
+* SSH public key: <leave empty>
+
   Click Next.
 
 Template Tab
 
-* Select Debian 12 template  
-  
+* Storage: local
+* Template: debian-12-standard_12.12-1_amd64.tar.zst
+
   Click Next.
 
 Disks Tab
 
-* Storage: "local-lvm" if you want to create on system disk; <disk_name>, in our case "data-hdd", on data disk.  
-* Disk Size (GiB): <size>  
+* Storage: "local-lvm" (system SSD). All current containers use local-lvm; persistent data goes to the HDD through bind mounts.
+* Disk Size (GiB): <size>
   Click Next.
 
 CPU Tab
 
-* Cores: <quantity>  
-  
+* Cores: <quantity>
+
   Click Next.
 
 Memory Tab
 
-* Memory: <quantity> MB  
-* Swap: <quantity> MB  
-  
+* Memory: <quantity> MB
+* Swap: <quantity> MB
+
   Click Next.
 
 Network Tab
 
-* Name: eth0  
-* Bridge: vmbr0  
-* IPv4: DHCP  
-* IPv6: None  
-  
+* Name: eth0
+* Bridge: vmbr0
+* IPv4: Static
+  * IPv4/CIDR: <service IP>/24 (see [IP Addressing](#ip-addressing))
+  * Gateway: 192.168.1.1
+* IPv6: None
+
   Click Next.
 
 DNS Tab
 
-* Leave default (use host)  
-  
+* Leave default (use host)
+
   Click Next.
 
 Confirm Tab
 
-* Check everything  
-* Uncheck "start after created"  
-  
+* Check everything
+* Uncheck "start after created"
+
   Click Finish.
 
 3) Verification
@@ -510,10 +501,172 @@ The container assumes a CT ID and appears as Stopped.
 
 ## Pi-hole
 
+### Prepare LXC
+
+1. Create LXC container (step by step from [virtualization configuration](#virtualization)).
+
+    General:
+    - CT ID: 100
+    - Hostname: pihole
+    - Unprivileged: true
+    - Nesting: true
+    - Password: <define>
+    - SSH public key: empty
+
+    Template:
+    - Debian 12
+
+    Disks:
+    - Storage: local-lvm
+    - Disk size: 8GB
+
+    CPU:
+    - Cores: 1
+
+    Memory:
+    - 512MB
+    - Swap: 512MB
+
+    Network:
+    - Name: eth0
+    - Bridge: vmbr0
+    - IPv4: Static 192.168.1.11/24, Gateway 192.168.1.1
+    - IPv6: None
+
+    DNS:
+    - Default
+
+    Or simply run:
+    ```bash
+    pct create 100 local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst \
+    --hostname pihole \
+    --cores 1 \
+    --memory 512 \
+    --swap 512 \
+    --net0 name=eth0,bridge=vmbr0,ip=192.168.1.11/24,gw=192.168.1.1,firewall=1,type=veth \
+    --rootfs local-lvm:8 \
+    --unprivileged 1 \
+    --features nesting=1 \
+    --password
+    ```
+
+2. Start on boot
+
+    Pi-hole is the network DNS: if it's down, name resolution on the LAN is down.
+
+    ```bash
+    pct set 100 --onboot 1
+    ```
+
+    Or in the GUI: *100 (pihole)* > *Options* > *Start at boot* > Yes.
+
+3. Create persistent data directory (before installing Pi-hole)
+
+    ```bash
+    # On Proxmox host:
+    mkdir -p /srv/data/containers/pihole
+    chown 100000:100000 /srv/data/containers/pihole
+    ```
+
+    - 100000 → the container's root user as seen by the host (unprivileged containers shift UIDs by 100000)
+    - The installer needs to write into this folder
+
+4. Configure bind mount for persistent data
+
+    ```bash
+    pct set 100 -mp0 /srv/data/containers/pihole,mp=/etc/pihole
+    ```
+
+    - /srv/data/containers/pihole → host (HDD)
+    - /etc/pihole → inside the container: Pi-hole config (`pihole.toml`), blocklists (`gravity.db`) and the long-term query database (`pihole-FTL.db`, which grows over time, so it's good that it's on the HDD)
+
+### Install service
+
+1. Enter the container
+
+    ```bash
+    pct start 100
+    pct enter 100
+    ```
+
+2. Update container and install curl
+
+    ```bash
+    apt update
+    apt upgrade -y
+    apt install -y curl
+    ```
+
+3. Run the official installer
+
+    ```bash
+    curl -sSL https://install.pi-hole.net | bash
+    ```
+
+    Installer choices:
+    - Interface: eth0
+    - Upstream DNS provider: Cloudflare (1.1.1.1 / 1.0.0.1)
+    - Blocklists: keep the default list
+    - Query logging: on
+    - Privacy mode: 0 (show everything)
+
+    At the end the installer shows the admin password. Change it with:
+
+    ```bash
+    pihole setpassword
+    ```
+
+    After the install, the host folder owner changes to `100999:101000`. That is the `pihole` user (UID 999) inside the container. This is expected, keep it.
+
+### Configure
+
+Web interface: `http://192.168.1.11/admin` (also `https://192.168.1.11/admin` with Pi-hole's own self-signed certificate).
+
+1. DNS settings (*Settings* > *DNS*)
+    - Upstream DNS servers: 1.1.1.1 and 1.0.0.1 (Cloudflare)
+    - Interface settings: "Allow only local requests" (answers only devices on the local network)
+
+2. DHCP (*Settings* > *DHCP*)
+    - Disabled. The router keeps doing DHCP.
+
+3. Local DNS records (*Settings* > *Local DNS Records*)
+
+    | Domain | IP | Reason |
+    | :---- | :---- | :---- |
+    | vault.lan | 192.168.1.13 | Vaultwarden, through NPM |
+    | seafile.lan | 192.168.1.13 | Seafile (planned), through NPM |
+
+    All records point to NPM, never directly to the service.
+
+    Or from the container shell:
+
+    ```bash
+    pihole-FTL --config dns.hosts '["192.168.1.13 vault.lan","192.168.1.13 seafile.lan"]'
+    ```
+
+4. Router: make devices use Pi-hole
+
+    In the router's DHCP/LAN settings, set the DNS server handed out to devices to `192.168.1.11`.
+    Without this step, devices keep using the router as DNS and nothing is filtered, and `*.lan` names don't resolve.
+    Devices pick up the new DNS when they renew their DHCP lease (reconnect to the network).
+
+### Verify
+
+From the Proxmox host or any device on the network:
+
+```bash
+dig +short @192.168.1.11 vault.lan
+```
+
+Should return `192.168.1.13`.
+
+In the Pi-hole dashboard, queries from your devices should start appearing.
+
 ## NPM - Nginx Proxy Manager
 
 ### Prepare LXC
- 1. Create LXC container (step by step from [virtualization configuration](#virtualization)).
+
+1. Create LXC container (step by step from [virtualization configuration](#virtualization)).
 
     General:
     - CT ID: 102
@@ -531,139 +684,244 @@ The container assumes a CT ID and appears as Stopped.
     - Disk size: 8GB
 
     CPU:
-    - Core 1
+    - Cores: 1
 
     Memory:
-    - 512MB
+    - 1024MB
     - Swap: 512MB
 
     Network:
     - Name: eth0
     - Bridge: vmbr0
-    - IPv4: Static 192.168.1.13/24
+    - IPv4: Static 192.168.1.13/24, Gateway 192.168.1.1
     - IPv6: None
 
     DNS:
     - Default
 
-  2. Ensure container configuration is
+2. Ensure container configuration is
 
-      ```bash
-      nano /etc/pve/lxc/102.conf
-      ```
+    ```bash
+    nano /etc/pve/lxc/102.conf
+    ```
 
-      Content:
-      ```ini
-      features: keyctl=1,nesting=1
-      unprivileged: 1
+    Content (keep the lines Proxmox generated, make sure these are present):
+    ```ini
+    features: keyctl=1,nesting=1
+    unprivileged: 1
 
-      lxc.apparmor.profile: unconfined
-      lxc.cgroup2.devices.allow: a
-      lxc.mount.auto: proc:rw sys:rw
-      ```
+    lxc.apparmor.profile: unconfined
+    lxc.cgroup2.devices.allow: a
+    lxc.mount.auto: proc:rw sys:rw
+    ```
 
-  2. Create persistent data directory
+    - `keyctl=1,nesting=1` → required for Docker inside an unprivileged LXC
+    - The last 3 lines remove most of the container's isolation. They were added during troubleshooting and may not be needed (see [TODOs](#todos))
 
-      ```bash
-      # On Proxmox host:
-      mkdir -p /srv/data/containers/npm/{data,letsencrypt}
-      ```
-  
-  3. Configure bind mount for persistent data
+> NPM has **no bind mount**: all its data stays inside the container disk (SSD). Its config and certificates are small (< 1MB), so this is fine as long as the container is backed up (see [TODOs](#todos)).
 
-      ```bash
-      # Edit container configuration file:
-      nano /etc/pve/lxc/102.conf
+### Install service
 
-      # Add line at the end:
-      mp0: /srv/data/containers/npm/data,mp=/data
-      mp1: /srv/data/containers/npm/letsencrypt,mp=/etc/letsencrypt
-      ```
+1. Enter the container
 
-  4. Adjust permissions
+    ```bash
+    pct start 102
+    pct enter 102
+    ```
 
-      ```bash
-      chown -R 0:0 /srv/data/containers/npm
-      ```
-  
-  5. Adjust NPM docker data-root to save images, layers, cache and persistent volumes on sdb (data) - Step 1
+2. Update container
 
-      ```bash
-      mkdir -p /data/docker
-      ```
-  
-  ### Install service
+    ```bash
+    apt update
+    apt upgrade -y
+    ```
 
-  1. Enter the container
+3. Install Docker from Docker's official repository (gives the `docker compose` command)
 
-      ```bash
-      pct start 102
-      pct enter 102
-      ```
+    ```bash
+    apt install -y ca-certificates curl
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
 
-  2. Install docker
-      
-      ```bash
-      # Update container
-      apt update
-      apt upgrade -y
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+      > /etc/apt/sources.list.d/docker.list
 
-      apt install -y docker.io docker-compose
-      systemctl enable --now docker
-      ```
-  
-  3. Configure NPM
+    apt update
+    apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    ```
 
-      ```bash
-      nano docker-compose.yml
-      ```
+    - `bookworm` here is correct: it's the container's Debian version (Debian 12), not the host's.
 
-      Content:
+4. Set Docker's data folder to /data/docker
 
-      ```yaml
-      services:
-        npm:
-          image: jc21/nginx-proxy-manager:latest
-          container_name: nginx-proxy-manager
-          restart: unless-stopped
-          ports:
-            - "80:80"
-            - "443:443"
-            - "81:81"
-          volumes:
-            - /data/npm:/data
-            - /data/letsencrypt:/etc/letsencrypt
-      ```
+    ```bash
+    systemctl stop docker
+    mkdir -p /data/docker
+    nano /etc/docker/daemon.json
+    ```
 
-  4. Adjust NPM docker data-root to save images, layers, cache and persistent volumes on sdb (data) - Step 2
+    Content:
 
-      ```bash
-      systemctl stop docker
-      nano /etc/docker/daemon.json
-      ```
+    ```json
+    {
+      "data-root": "/data/docker"
+    }
+    ```
 
-      Content:
-      
-      ```json
-      {
-        "data-root": "/data/docker"
-      }
-      ```
+    ```bash
+    systemctl start docker
+    docker info | grep "Docker Root Dir"
+    ```
 
-  5. Bring up:
+    Should show `Docker Root Dir: /data/docker`.
 
-      ```bash
-      systemctl daemon-reload
-      systemctl start docker
-      docker-compose up -d
-      ```
+    - /data is a normal folder inside the container disk (SSD), not a bind mount. Docker images, layers and cache are stored there (~1GB).
 
-  ### Verify
+5. Configure NPM
 
-  1. Create admin account
-  2. Access the dashboard
+    ```bash
+    nano /data/docker-compose.yml
+    ```
+
+    Content:
+
+    ```yaml
+    services:
+      npm:
+        image: jc21/nginx-proxy-manager:latest
+        container_name: nginx-proxy-manager
+        restart: unless-stopped
+        ports:
+          - "80:80"
+          - "81:81"
+          - "443:443"
+        volumes:
+          - /data/npm:/data
+          - /data/letsencrypt:/etc/letsencrypt
+    ```
+
+    - /data/npm → NPM config, database, proxy hosts, uploaded certificates, logs
+    - /data/letsencrypt → Let's Encrypt certificates (not used for .lan)
+
+6. Bring up:
+
+    ```bash
+    cd /data
+    docker compose up -d
+    ```
+
+### Verify
+
+1. Open `http://192.168.1.13:81` in the browser
+2. Create the admin account
+3. Access the dashboard
+
+```bash
+docker ps
+```
+
+Should show the `nginx-proxy-manager` container as `Up`.
+
+## Certificates (internal HTTPS)
+
+`.lan` is not a public domain, so Let's Encrypt can't issue certificates for it. Internal HTTPS uses certificates we create ourselves with OpenSSL and upload to NPM as *Custom* certificates.
+
+### Current method (in use)
+
+One self-signed certificate per service, valid for 10 years. Generated inside NPM's Docker container, so the files end up in `/data/npm/certs/<service>/` inside LXC 102:
+
+```bash
+# On LXC 102:
+docker exec -it nginx-proxy-manager bash
+
+# Inside the NPM docker container:
+mkdir -p /data/certs/vault
+cd /data/certs/vault
+
+openssl req -x509 -nodes -days 3650 \
+  -newkey rsa:2048 \
+  -keyout vault.lan.key \
+  -out vault.lan.crt \
+  -subj "/CN=vault.lan"
+```
+
+Then copy the two files to your computer, for example from that computer:
+
+```bash
+ssh root@192.168.1.10 "pct exec 102 -- cat /data/npm/certs/vault/vault.lan.crt" > vault.lan.crt
+ssh root@192.168.1.10 "pct exec 102 -- cat /data/npm/certs/vault/vault.lan.key" > vault.lan.key
+```
+
+and upload them in NPM: *SSL Certificates* > *Add SSL Certificate* > *Custom* (see the Vaultwarden section).
+
+**Limitations of this method**
+
+- The certificate has only a Common Name (CN), no *Subject Alternative Name* (SAN). Modern browsers (Chrome, Edge, Safari) and Android ignore the CN and reject the certificate even if you trust it manually. Only "accept the risk and continue" works.
+- Self-signed certificates are rejected by apps: the Bitwarden mobile/desktop apps (Vaultwarden) and the Seafile sync clients will refuse to connect.
+- Every service has its own certificate, so every device has to trust every certificate one by one.
+
+### Recommended method: local Certificate Authority (CA)
+
+Create your own small CA once, install it on each device once, and sign one certificate per service with it. Every device then trusts every service, now and in the future.
+
+1. Create the CA (once, on the Proxmox host)
+
+    ```bash
+    mkdir -p /root/ca && chmod 700 /root/ca
+    cd /root/ca
+
+    openssl req -x509 -nodes -newkey rsa:4096 -days 3650 \
+      -keyout cerebro-ca.key \
+      -out cerebro-ca.crt \
+      -subj "/CN=Cerebro Home CA"
+
+    chmod 600 cerebro-ca.key
+    ```
+
+    - `cerebro-ca.key` → the CA's private key. Anyone who has it can create certificates your devices trust. Never copy it to other machines; back it up somewhere safe.
+    - `cerebro-ca.crt` → the CA certificate, the file you install on devices.
+
+2. Create a certificate for a service (repeat for each service, e.g. vault.lan, seafile.lan)
+
+    ```bash
+    cd /root/ca
+    NAME=vault.lan
+
+    openssl req -nodes -newkey rsa:2048 \
+      -keyout $NAME.key \
+      -out $NAME.csr \
+      -subj "/CN=$NAME"
+
+    openssl x509 -req -in $NAME.csr \
+      -CA cerebro-ca.crt -CAkey cerebro-ca.key -CAcreateserial \
+      -days 825 -sha256 \
+      -extfile <(printf "subjectAltName=DNS:$NAME\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth") \
+      -out $NAME.crt
+    ```
+
+    - `-days 825` → Apple devices reject server certificates valid for longer than 825 days. Renew before it expires.
+    - Check the result: `openssl x509 -in $NAME.crt -noout -ext subjectAltName` should show `DNS:vault.lan`.
+
+3. Upload to NPM: *SSL Certificates* > *Add SSL Certificate* > *Custom*
+    - Certificate Key → `<name>.key`
+    - Certificate → `<name>.crt`
+    - Intermediate Certificate → `cerebro-ca.crt`
+
+4. Install `cerebro-ca.crt` on each device (once)
+    - **Windows:** double-click the file > *Install Certificate* > *Local Machine* > *Place all certificates in the following store* > *Trusted Root Certification Authorities*
+    - **Android:** *Settings* > *Security* > *Encryption & credentials* > *Install a certificate* > *CA certificate*
+    - **iPhone/iPad:** open the file to install the profile, then *Settings* > *General* > *About* > *Certificate Trust Settings* > enable it
+    - **Linux:** `cp cerebro-ca.crt /usr/local/share/ca-certificates/ && update-ca-certificates`
+    - **Firefox** (any OS) uses its own store: *Settings* > *Privacy & Security* > *Certificates* > *View Certificates* > *Authorities* > *Import*
+
+### Alternative for the future
+
+When Cloudflare is configured with a real domain (e.g. `vault.mydomain.com`), NPM can get free Let's Encrypt certificates using the *DNS challenge* with a Cloudflare API token, even for services that are only reachable inside the LAN. Then no device needs a CA installed.
 
 ## Vaultwarden
+
+> This container is currently **privileged** (`Unprivileged: false`). It works, but see [TODOs](#todos) about converting it to unprivileged before exposing it to the internet.
 
 ### Prepare LXC
  1. Create LXC container (step by step from [virtualization configuration](#virtualization)).
@@ -672,6 +930,7 @@ The container assumes a CT ID and appears as Stopped.
     - CT ID: 101
     - Hostname: vaultwarden
     - Unprivileged: false
+    - Nesting: true
     - Password: <define>
     - SSH public key: empty
 
@@ -683,7 +942,7 @@ The container assumes a CT ID and appears as Stopped.
     - Disk size: 8GB
 
     CPU:
-    - Core 1
+    - Cores: 1
 
     Memory:
     - 512MB
@@ -692,7 +951,7 @@ The container assumes a CT ID and appears as Stopped.
     Network:
     - Name: eth0
     - Bridge: vmbr0
-    - IPv4: Static (we will define the IP manually)
+    - IPv4: Static 192.168.1.12/24, Gateway 192.168.1.1
     - IPv6: None
 
     DNS:
@@ -700,7 +959,7 @@ The container assumes a CT ID and appears as Stopped.
 
     Or simply run:
     ```bash
-    pct create 101 local:vztmpl/debian-12-standard_12.3-1_amd64.tar.gz \
+    pct create 101 local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst \
     --hostname vaultwarden \
     --cores 1 \
     --memory 512 \
@@ -708,7 +967,8 @@ The container assumes a CT ID and appears as Stopped.
     --net0 name=eth0,bridge=vmbr0,ip=192.168.1.12/24,gw=192.168.1.1,type=veth \
     --rootfs local-lvm:8 \
     --unprivileged 0 \
-    --features nesting=1
+    --features nesting=1 \
+    --password
     ```
 
  2. Create persistent data directory
@@ -718,42 +978,21 @@ The container assumes a CT ID and appears as Stopped.
     mkdir -p /srv/data/containers/vaultwarden
     ```
 
+    - Owner stays `root:root`. The container is privileged, so its root user is the host's root and needs no UID shifting.
+
  3. Configure bind mount for persistent data
 
     ```bash
-    # Edit container configuration file:
-    nano /etc/pve/lxc/101.conf
-
-    # Add line at the end:
-    mp0: /srv/data/containers/vaultwarden,mp=/data
+    pct set 101 -mp0 /srv/data/containers/vaultwarden,mp=/data
     ```
 
-    - /srv/data/containers/vaultwarden → host (HDD)  
+    - /srv/data/containers/vaultwarden → host (HDD)
     - /data → inside the container (Vaultwarden will use this directory for data)
- 
- 4. Set static IP in container
+
+ 4. Start the container and check the mount
 
     ```bash
-    # In the same file (101.conf), locate net0: and configure fixed IP, example:
-    net0: name=eth0,bridge=vmbr0,ip=192.168.1.12/24,gw=192.168.1.1,type=veth
-    ```
-
-    - Choose a free IP on the network, outside the DHCP range  
-    - Gateway is the same as your network (192.168.1.1)
-
- 5. Adjust bind mount permissions
-
-    ```bash
-    # On Proxmox host:
-    chown -R 101000:101000 /srv/data/containers/vaultwarden
-    ```
-
-    - 101000:101000 → mapping of unprivileged container root
-    - This prevents permission issues when installing Vaultwarden
-
- 6. Start the container
-
-    ```bash
+    pct start 101
     pct enter 101
     ls -l /data
     ```
@@ -762,39 +1001,25 @@ The container assumes a CT ID and appears as Stopped.
 
 ### Install service
 
-1. Enter the container
-
-    ```bash
-    pct enter 101
-    ls -l /data
-    ```
-    
-2. Update container
+1. Update container (inside the container)
 
     ```bash
     apt update
     apt upgrade -y
     ```
 
-3. Install dependencies
+2. Install dependencies
 
     ```bash
     apt install -y curl docker.io
     systemctl enable --now docker
     ```
 
+    - `docker.io` is Debian's own Docker package. It's enough here because Vaultwarden runs with a single `docker run` command (no compose).
+
     If something like this appears
 
     ```plaintext
-    Synchronizing state of docker.service with SysV service script with /lib/systemd/systemd-sysv-install.
-    Executing: /lib/systemd/systemd-sysv-install enable docker
-    perl: warning: Setting locale failed.
-    perl: warning: Please check that your locale settings:
-            LANGUAGE = (unset),
-            LC_ALL = (unset),
-            LANG = "en_US.UTF-8"
-        are supported and installed on your system.
-    perl: warning: Falling back to the standard locale ("C").
     perl: warning: Setting locale failed.
     perl: warning: Please check that your locale settings:
             LANGUAGE = (unset),
@@ -804,7 +1029,7 @@ The container assumes a CT ID and appears as Stopped.
     perl: warning: Falling back to the standard locale ("C").
     ```
 
-    are just locale warnings and do not prevent Docker from working.
+    they are just locale warnings and do not prevent Docker from working.
 
     **Optional: fix locale warnings**
 
@@ -815,40 +1040,42 @@ The container assumes a CT ID and appears as Stopped.
 
     * Choose `en_US.UTF-8` as default
 
-    ```bash
-    export LANG=en_US.UTF-8
-    export LC_ALL=en_US.UTF-8
-    ```
-
-4. Create data directory (bind mount already exists, just ensure permission inside container)
-
-    ```bash
-    mkdir -p /data
-    chown -R 1000:1000 /data
-    ```
-
-    - 1000:1000 → default user the container will use for Docker Vaultwarden
-
-
-5. Run Vaultwarden via Docker
+3. Run Vaultwarden via Docker
 
     ```bash
     docker run -d \
       --name vaultwarden \
       -v /data:/data \
       -e ROCKET_PORT=8080 \
+      -e DOMAIN=https://vault.lan \
       -p 8080:8080 \
       --restart unless-stopped \
       vaultwarden/server:latest
     ```
 
-    * -v /data:/data → persistent data on HDD
+    * -v /data:/data → persistent data on HDD (database `db.sqlite3`, keys, attachments)
+    * -e ROCKET_PORT=8080 → Vaultwarden listens on 8080 inside the docker container
+    * -e DOMAIN=https://vault.lan → the address users open. Vaultwarden uses it to build links (emails, attachments, WebAuthn/passkeys)
     * -p 8080:8080 → access to Vaultwarden web UI on port 8080
     * --restart unless-stopped → container starts automatically with LXC
 
+    > The running container was created without `DOMAIN` (see [TODOs](#todos)).
 
 ### Configure Vaultwarden on NPM
 
+#### Create SSL certificate
+
+Create the certificate for `vault.lan` as described in [Certificates](#certificates-internal-https), then import it into NPM:
+
+1. Go to SSL Certificates
+2. Click Add SSL Certificate
+3. Choose Custom
+
+Fill in:
+- Certificate name: vault-internal
+- Certificate Key → upload vault.lan.key
+- Certificate → upload vault.lan.crt
+- Intermediate Certificate → leave empty (or `cerebro-ca.crt` if using the local CA)
 
 #### Configure proxy host
 
@@ -856,7 +1083,7 @@ In the NPM dashboard go to `Proxy Hosts → Add Proxy Host`.
 
 "Details" Tab
 
-- Domain Names (Example: vault.lan)
+- Domain Names: vault.lan
 - Scheme: http
 - Forward Hostname / IP: 192.168.1.12
 - Forward Port: 8080
@@ -865,69 +1092,19 @@ In the NPM dashboard go to `Proxy Hosts → Add Proxy Host`.
 - Websockets Support: true
 
 "SSL" Tab
-- SSL Certificate: <empty>
-- Force SSL: false
-- HTTP/2 support: false
-
-#### Create SSL certificate
-
-1. Enter the NPM container
-
-    ```bash
-    docker exec -it nginx-proxy-manager bash
-    ```
-2. Generate the certificate
-
-    ```bash
-    mkdir -p /data/certs/vault
-    cd /data/certs/vault
-
-    openssl req -x509 -nodes -days 3650 \
-      -newkey rsa:2048 \
-      -keyout vault.lan.key \
-      -out vault.lan.crt \
-      -subj "/CN=vault.lan"
-    ```
-
-This creates two files:
-- vault.lan.key  → private key
-- vault.lan.crt  → certificate
-
-Let's import this certificate into Nginx Proxy Manager using the Custom option.
-
-In Nginx Proxy Manager:
-
-1. Go to SSL Certificates
-2. Click Add SSL Certificate
-3. Choose Custom
-
-Fill in:
-- Certificate name: vault-internal
-- Certificate Key → upload vault.lan.key  
-- Certificate → upload vault.lan.crt  
-- Intermediate Certificate → leave empty
-
-This creates an internal certificate in NPM valid for HTTPS.
-
-#### Associate SSL with proxy host
-
-Now:
-1. Go to Proxy Hosts
-2. Edit the vault.lan proxy
-3. Go to SSL tab
-
-Configure:
 - SSL Certificate: vault-internal
 - Force SSL: true
 - HTTP/2 Support: true
 
 ### Configure DNS record in Pi-hole
 
-Access the Pi-hole interface and go to `Local DNS → DNS Records`. Add:
+Access the Pi-hole interface and go to *Settings* > *Local DNS Records*. Add:
 - Domain: vault.lan
-- IP Address: <NPM IP>
+- IP Address: 192.168.1.13 (NPM, not Vaultwarden)
 
 ### Verify
+
+Inside LXC 101:
 
 ```bash
 docker ps
@@ -939,10 +1116,81 @@ Should show something like:
 | :---- | :---- | :---- | :---- |
 |xxxxxxx|vaultwarden/server|Up 2s|0.0.0.0:8080->8080/tcp|
 
-In the browser, you can test:
+In the browser, test:
 > https://vault.lan
 
 * Vaultwarden web interface should open
-* Initial login: create the admin account (you define it)
+* Click *Create account* and create your user account
+
+Notes:
+* `http://192.168.1.12:8080` still answers, but the web vault doesn't work there: browsers only allow the encryption functions (WebCrypto) it needs over HTTPS. Always use https://vault.lan.
+
+### Hardening (after creating your accounts)
+
+Not applied yet (see [TODOs](#todos)).
+
+1. Disable new sign-ups, so nobody else on the network can create an account.
+2. Set `DOMAIN` (if the container was created without it).
+
+Docker containers can't change their settings in place: remove and recreate. Data is safe because it lives in /data (HDD).
+
+```bash
+# Inside LXC 101:
+docker stop vaultwarden
+docker rm vaultwarden
+
+docker run -d \
+  --name vaultwarden \
+  -v /data:/data \
+  -e ROCKET_PORT=8080 \
+  -e DOMAIN=https://vault.lan \
+  -e SIGNUPS_ALLOWED=false \
+  -p 8080:8080 \
+  --restart unless-stopped \
+  vaultwarden/server:latest
+```
+
+* SIGNUPS_ALLOWED=false → blocks new accounts. Existing accounts keep working.
+
+Take a backup before doing this: `vzdump 101 --storage data-hdd --mode snapshot --compress zstd` on the Proxmox host.
 
 ## Seafile
+
+> To be set up from scratch. A previous attempt was removed.
+
+## TODOs
+
+### Host
+
+- [x] **Fix the Proxmox repository on the host** (2026-11-17). `pve-no-subscription.list` pointed to `bookworm` (Proxmox 8) while the host runs Proxmox 9 (`trixie`), so Proxmox packages were never updated. Replaced by `/etc/apt/sources.list.d/proxmox.sources` (trixie), then `apt full-upgrade` (9.1 → 9.2).
+- [ ] Reboot the host to load the new kernel installed by the upgrade (6.17.2 → 7.0.14, the new default in Proxmox 9.2). If something breaks, pick `6.17.13` in the boot menu and pin it with `proxmox-boot-tool kernel pin 6.17.13-21-pve`.
+- [ ] Decide whether NPM (102) should start on boot (`pct set 102 --onboot 1`). Today it doesn't, so after the 2026-11-08 reboot it stayed stopped.
+- [x] Add `nofail` to the `/srv/data` line in the host's `/etc/fstab` (2026-11-17).
+- [x] Run `pvesm set data-hdd --is_mountpoint yes` on the host (2026-11-17).
+- [x] Clean up leftovers on the HDD from earlier attempts (2026-11-17): `/srv/data/containers/npm/` (~19GB old Docker data), `/srv/data/npm/`, `/srv/data/containers/seafile/`.
+
+### Services
+
+- [ ] Update Pi-hole (core v6.3 → v6.5, web v6.4 → v6.6.1, FTL v6.4.1 → v6.8): `pct exec 100 -- pihole -up`.
+- [ ] Vaultwarden hardening: `SIGNUPS_ALLOWED=false` and `DOMAIN=https://vault.lan` (see [Hardening](#hardening-after-creating-your-accounts)).
+- [ ] Decide whether to convert Vaultwarden (101) to unprivileged. Must be done before exposing it to the internet (Cloudflare).
+- [ ] Test whether NPM (102) works without `lxc.apparmor.profile: unconfined`, `lxc.cgroup2.devices.allow: a` and `lxc.mount.auto: proc:rw sys:rw` (remove one at a time, restart, test).
+- [ ] Migrate certificates to the local CA (see [Certificates](#certificates-internal-https)). Required before using the Bitwarden apps or Seafile sync clients.
+- [ ] Seafile: set up from scratch (IP 192.168.1.14, DNS record already exists in Pi-hole).
+
+### Logs
+
+- [ ] Send logs to the HDD for Pi-hole, Vaultwarden and NPM. Today they are written inside each container disk (SSD):
+  - Pi-hole: `/var/log/pihole` (~40MB)
+  - Vaultwarden: Docker logs inside LXC 101
+  - NPM: `/data/npm/logs` and Docker logs inside LXC 102
+- [ ] Premise for every new service (Seafile, Immich, ...): logs go to `/srv/data/containers/<name>` from the start.
+
+### Backups
+
+- [ ] Implement backups. Nothing is scheduled today. The only backups are manual ones of 100, 101 and 102 taken on 2026-11-17 in `/srv/data/dump` (before the Proxmox upgrade).
+  - Note: Proxmox backups (vzdump) **don't include bind mounts**. Pi-hole's `/etc/pihole` and Vaultwarden's `/data` (in `/srv/data/containers/`) must be backed up separately.
+  - Proxmox backup job for the LXCs (Datacenter > Backup) to data-hdd
+  - Retention policy (data-hdd currently keeps all backups forever: `prune-backups keep-all=1`)
+  - Copy to a second disk or off-site (data-hdd is on the same server, so it doesn't protect against losing the server)
+  - Test a restore
