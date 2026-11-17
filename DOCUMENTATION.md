@@ -67,7 +67,7 @@ This document describes, in a consolidated manner, all the architecture decision
 
 - **Premise:** logs should go to sdb (1TB HDD), avoiding overloading sda (240GB SSD).
 - Standardize this by sending each service's logs to its folder under /srv/data/containers/<name>.
-- Pi-hole, Vaultwarden and NPM don't follow this yet (see [TODOs](#todos)). Every new service (Seafile, Immich, ...) must follow it from the start.
+- Pi-hole and NPM's Docker logs don't follow this yet (see [TODOs](#todos)). Every new service (Seafile, Immich, ...) must follow it from the start.
 
 ### IP Addressing
 
@@ -948,15 +948,14 @@ When Cloudflare is configured with a real domain (e.g. `vault.mydomain.com`), NP
 
 ## Vaultwarden
 
-> This container is currently **privileged** (`Unprivileged: false`). It works, but see [TODOs](#todos) about converting it to unprivileged before exposing it to the internet.
-
 ### Prepare LXC
- 1. Create LXC container (step by step from [virtualization configuration](#virtualization)).
+
+1. Create LXC container (step by step from [virtualization configuration](#virtualization)).
 
     General:
     - CT ID: 101
     - Hostname: vaultwarden
-    - Unprivileged: false
+    - Unprivileged: true
     - Nesting: true
     - Password: <define>
     - SSH public key: empty
@@ -991,102 +990,184 @@ When Cloudflare is configured with a real domain (e.g. `vault.mydomain.com`), NP
     --cores 1 \
     --memory 512 \
     --swap 512 \
-    --net0 name=eth0,bridge=vmbr0,ip=192.168.1.12/24,gw=192.168.1.1,type=veth \
+    --net0 name=eth0,bridge=vmbr0,ip=192.168.1.12/24,gw=192.168.1.1,firewall=1,type=veth \
     --rootfs local-lvm:8 \
-    --unprivileged 0 \
-    --features nesting=1 \
+    --unprivileged 1 \
+    --features keyctl=1,nesting=1 \
     --password
     ```
 
- 2. Create persistent data directory
+2. Enable keyctl (if the container was created in the GUI)
+
+    ```bash
+    pct set 101 --features keyctl=1,nesting=1
+    ```
+
+    - `keyctl=1,nesting=1` → required for Docker inside an unprivileged LXC
+
+3. Create persistent data directory
 
     ```bash
     # On Proxmox host:
-    mkdir -p /srv/data/containers/vaultwarden
+    mkdir -p /srv/data/containers/vaultwarden/data
+    chown -R 100000:100000 /srv/data/containers/vaultwarden
     ```
 
-    - Owner stays `root:root`. The container is privileged, so its root user is the host's root and needs no UID shifting.
+    - 100000 → the container's root user as seen by the host (unprivileged containers shift UIDs by 100000). Vaultwarden runs as root inside its Docker container.
 
- 3. Configure bind mount for persistent data
+4. Configure bind mount for persistent data
 
     ```bash
-    pct set 101 -mp0 /srv/data/containers/vaultwarden,mp=/data
+    pct set 101 -mp0 /srv/data/containers/vaultwarden/data,mp=/data/vaultwarden
     ```
 
-    - /srv/data/containers/vaultwarden → host (HDD)
-    - /data → inside the container (Vaultwarden will use this directory for data)
+    - /srv/data/containers/vaultwarden/data → /data/vaultwarden inside the container: database (`db.sqlite3`), keys (`rsa_key.pem`), attachments and logs
+    - Docker itself (/data/docker: images, layers, cache) stays on the container disk (SSD). It can always be downloaded again.
 
- 4. Start the container and check the mount
+5. Start on boot
+
+    ```bash
+    pct set 101 --onboot 1
+    ```
+
+    Or in the GUI: *101 (vaultwarden)* > *Options* > *Start at boot* > Yes.
+
+### Install service
+
+1. Enter the container
 
     ```bash
     pct start 101
     pct enter 101
-    ls -l /data
     ```
 
-    The directory should exist and you should have no permission errors.
-
-### Install service
-
-1. Update container (inside the container)
+2. Update container
 
     ```bash
     apt update
     apt upgrade -y
     ```
 
-2. Install dependencies
+    If you see `perl: warning: Setting locale failed` messages during installs, they are harmless. Optional fix: `apt install -y locales && dpkg-reconfigure locales` and choose `en_US.UTF-8`.
+
+3. Install Docker from Docker's official repository (same as [NPM](#npm---nginx-proxy-manager))
 
     ```bash
-    apt install -y curl docker.io
-    systemctl enable --now docker
+    apt install -y ca-certificates curl
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+      > /etc/apt/sources.list.d/docker.list
+
+    apt update
+    apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
     ```
 
-    - `docker.io` is Debian's own Docker package. It's enough here because Vaultwarden runs with a single `docker run` command (no compose).
-
-    If something like this appears
-
-    ```plaintext
-    perl: warning: Setting locale failed.
-    perl: warning: Please check that your locale settings:
-            LANGUAGE = (unset),
-            LC_ALL = (unset),
-            LANG = "en_US.UTF-8"
-        are supported and installed on your system.
-    perl: warning: Falling back to the standard locale ("C").
-    ```
-
-    they are just locale warnings and do not prevent Docker from working.
-
-    **Optional: fix locale warnings**
+4. Set Docker's data folder to /data/docker
 
     ```bash
-    apt install -y locales
-    dpkg-reconfigure locales
+    systemctl stop docker docker.socket
+    mkdir -p /data/docker
+    nano /etc/docker/daemon.json
     ```
 
-    * Choose `en_US.UTF-8` as default
+    Content:
 
-3. Run Vaultwarden via Docker
+    ```json
+    {
+      "data-root": "/data/docker"
+    }
+    ```
 
     ```bash
-    docker run -d \
-      --name vaultwarden \
-      -v /data:/data \
-      -e ROCKET_PORT=8080 \
-      -e DOMAIN=https://vault.lan \
-      -p 8080:8080 \
-      --restart unless-stopped \
-      vaultwarden/server:latest
+    systemctl start docker
+    docker info | grep "Docker Root Dir"
     ```
 
-    * -v /data:/data → persistent data on HDD (database `db.sqlite3`, keys, attachments)
-    * -e ROCKET_PORT=8080 → Vaultwarden listens on 8080 inside the docker container
-    * -e DOMAIN=https://vault.lan → the address users open. Vaultwarden uses it to build links (emails, attachments, WebAuthn/passkeys)
-    * -p 8080:8080 → access to Vaultwarden web UI on port 8080
-    * --restart unless-stopped → container starts automatically with LXC
+    Should show `Docker Root Dir: /data/docker`.
 
-    > The running container was created without `DOMAIN` (see [TODOs](#todos)).
+5. Configure Vaultwarden
+
+    ```bash
+    mkdir -p /data/vaultwarden/logs
+    nano /data/docker-compose.yml
+    ```
+
+    Content:
+
+    ```yaml
+    services:
+      vaultwarden:
+        image: vaultwarden/server:latest
+        container_name: vaultwarden
+        restart: unless-stopped
+        ports:
+          - "8080:80"
+        environment:
+          DOMAIN: "https://vault.lan"
+          SIGNUPS_ALLOWED: "true"
+          LOG_FILE: "/data/logs/vaultwarden.log"
+        volumes:
+          - /data/vaultwarden:/data
+    ```
+
+    - `8080:80` → Vaultwarden listens on 80 inside its Docker container; NPM forwards to port 8080 of the LXC
+    - DOMAIN → the address users open. Vaultwarden uses it to build links (attachments, WebAuthn/passkeys)
+    - SIGNUPS_ALLOWED → `true` only until your accounts are created (see step 8)
+    - LOG_FILE → logs go to /data/vaultwarden/logs, on the HDD
+    - /data/vaultwarden is the bind mount from Prepare LXC step 4 (HDD)
+
+6. Rotate the log file
+
+    Vaultwarden doesn't rotate its own log file, so let logrotate (already installed in the Debian template) do it:
+
+    ```bash
+    nano /etc/logrotate.d/vaultwarden
+    ```
+
+    Content:
+
+    ```
+    /data/vaultwarden/logs/*.log {
+        weekly
+        rotate 4
+        compress
+        missingok
+        notifempty
+        copytruncate
+    }
+    ```
+
+    - Keeps 4 weeks of compressed logs. `copytruncate` is needed because Vaultwarden keeps the file open.
+
+7. Bring up:
+
+    ```bash
+    cd /data
+    docker compose up -d
+    ```
+
+8. Create your accounts, then close sign-ups
+
+    Configure NPM and Pi-hole first (sections below), then open https://vault.lan, click *Create account* and create your user account(s).
+
+    Master password:
+    - Use a passphrase you can remember (4-6 random words; the Bitwarden generator has a *Passphrase* type) and write it on paper kept safe at home.
+    - Don't store it in another password manager (Google, browser, etc.): that account would become the real key to the vault.
+    - It can't be recovered: the vault is encrypted with it. If it's forgotten, the vault is lost.
+
+    Then block new accounts, so nobody else on the network can register:
+
+    ```bash
+    cd /data
+    sed -i 's/SIGNUPS_ALLOWED: "true"/SIGNUPS_ALLOWED: "false"/' docker-compose.yml
+    docker compose up -d
+    ```
+
+    - `docker compose up -d` recreates the container with the new setting. Data is safe because it lives in /data/vaultwarden (HDD).
+    - Existing accounts keep working. To add a user later, set it back to `"true"` temporarily.
 
 ### Configure Vaultwarden on NPM
 
@@ -1134,52 +1215,25 @@ Access the Pi-hole interface and go to *Settings* > *Local DNS Records*. Add:
 Inside LXC 101:
 
 ```bash
-docker ps
+cd /data
+docker compose ps
 ```
 
-Should show something like:
+Should show the `vaultwarden` container as `Up` (after about a minute, `(healthy)`).
 
-|CONTAINER ID|IMAGE|STATUS|PORTS|
-| :---- | :---- | :---- | :---- |
-|xxxxxxx|vaultwarden/server|Up 2s|0.0.0.0:8080->8080/tcp|
+```bash
+tail /data/vaultwarden/logs/vaultwarden.log
+```
+
+Should end with `Rocket has launched from http://0.0.0.0:80`.
 
 In the browser, test:
 > https://vault.lan
 
 * Vaultwarden web interface should open
-* Click *Create account* and create your user account
 
 Notes:
 * `http://192.168.1.12:8080` still answers, but the web vault doesn't work there: browsers only allow the encryption functions (WebCrypto) it needs over HTTPS. Always use https://vault.lan.
-
-### Hardening (after creating your accounts)
-
-Not applied yet (see [TODOs](#todos)).
-
-1. Disable new sign-ups, so nobody else on the network can create an account.
-2. Set `DOMAIN` (if the container was created without it).
-
-Docker containers can't change their settings in place: remove and recreate. Data is safe because it lives in /data (HDD).
-
-```bash
-# Inside LXC 101:
-docker stop vaultwarden
-docker rm vaultwarden
-
-docker run -d \
-  --name vaultwarden \
-  -v /data:/data \
-  -e ROCKET_PORT=8080 \
-  -e DOMAIN=https://vault.lan \
-  -e SIGNUPS_ALLOWED=false \
-  -p 8080:8080 \
-  --restart unless-stopped \
-  vaultwarden/server:latest
-```
-
-* SIGNUPS_ALLOWED=false → blocks new accounts. Existing accounts keep working.
-
-Take a backup before doing this: `vzdump 101 --storage data-hdd --mode snapshot --compress zstd` on the Proxmox host.
 
 ## Seafile
 
@@ -1201,17 +1255,19 @@ Take a backup before doing this: `vzdump 101 --storage data-hdd --mode snapshot 
 ### Services
 
 - [ ] Update Pi-hole (core v6.3 → v6.5, web v6.4 → v6.6.1, FTL v6.4.1 → v6.8): `pct exec 100 -- pihole -up`.
-- [ ] Vaultwarden hardening: `SIGNUPS_ALLOWED=false` and `DOMAIN=https://vault.lan` (see [Hardening](#hardening-after-creating-your-accounts)).
-- [ ] Decide whether to convert Vaultwarden (101) to unprivileged. Must be done before exposing it to the internet (Cloudflare).
+- [x] Rebuild Vaultwarden (101) from scratch (2026-11-17): unprivileged, Docker from Docker's repository with compose, `DOMAIN` set, data and logs on the HDD, starts on boot. The old one was privileged and only held test data.
+- [x] Vaultwarden: close sign-ups (`SIGNUPS_ALLOWED: "false"`) after creating the account (2026-11-17).
+- [x] Delete the old Vaultwarden test data, `/srv/data/containers/vaultwarden.old` (2026-11-17).
+- [ ] Vaultwarden: enable two-step login (*Settings → Security → Two-step login*) with an authenticator app, and keep the recovery code on paper.
 - [ ] Test whether NPM (102) works without `lxc.apparmor.profile: unconfined`, `lxc.cgroup2.devices.allow: a` and `lxc.mount.auto: proc:rw sys:rw` (remove one at a time, restart, test).
 - [ ] Migrate certificates to the local CA (see [Certificates](#certificates-internal-https)). Required before using the Bitwarden apps or Seafile sync clients.
 - [ ] Seafile: set up from scratch (IP 192.168.1.14, DNS record already exists in Pi-hole).
 
 ### Logs
 
-- [ ] Send logs to the HDD for Pi-hole, Vaultwarden and NPM. Today they are written inside each container disk (SSD):
+- [ ] Send logs to the HDD for Pi-hole and NPM. Today they are written inside each container disk (SSD):
   - Pi-hole: `/var/log/pihole` (~40MB)
-  - Vaultwarden: Docker logs inside LXC 101
+  - Vaultwarden: done (2026-11-17), logs in `/srv/data/containers/vaultwarden/data/logs`
   - NPM: its own logs (`/data/npm/logs`) are on the HDD since the 2026-11-17 migration. Docker logs inside LXC 102 are still on the SSD
 - [ ] Premise for every new service (Seafile, Immich, ...): logs go to `/srv/data/containers/<name>` from the start.
 
