@@ -718,7 +718,25 @@ In the Pi-hole dashboard, queries from your devices should start appearing.
     - `keyctl=1,nesting=1` → required for Docker inside an unprivileged LXC
     - The last 3 lines remove most of the container's isolation. They were added during troubleshooting and may not be needed (see [TODOs](#todos))
 
-> NPM has **no bind mount**: all its data stays inside the container disk (SSD). Its config and certificates are small (< 1MB), so this is fine as long as the container is backed up (see [TODOs](#todos)).
+3. Create persistent data directories
+
+    ```bash
+    # On Proxmox host:
+    mkdir -p /srv/data/containers/npm/{data,letsencrypt}
+    chown -R 100000:100000 /srv/data/containers/npm
+    ```
+
+    - 100000 → the container's root user as seen by the host (unprivileged containers shift UIDs by 100000). NPM runs as root inside its Docker container.
+
+4. Configure bind mounts for persistent data
+
+    ```bash
+    pct set 102 -mp0 /srv/data/containers/npm/data,mp=/data/npm -mp1 /srv/data/containers/npm/letsencrypt,mp=/data/letsencrypt
+    ```
+
+    - /srv/data/containers/npm/data → /data/npm inside the container: NPM config, database, proxy hosts, uploaded certificates and logs
+    - /srv/data/containers/npm/letsencrypt → /data/letsencrypt inside the container: Let's Encrypt certificates (not used for .lan)
+    - Docker itself (/data/docker: images, layers, cache) stays on the container disk (SSD). It can always be downloaded again.
 
 ### Install service
 
@@ -776,7 +794,7 @@ In the Pi-hole dashboard, queries from your devices should start appearing.
 
     Should show `Docker Root Dir: /data/docker`.
 
-    - /data is a normal folder inside the container disk (SSD), not a bind mount. Docker images, layers and cache are stored there (~1GB).
+    - /data/docker is a normal folder inside the container disk (SSD), not a bind mount. Docker images, layers and cache are stored there (~1GB).
 
 5. Configure NPM
 
@@ -801,8 +819,7 @@ In the Pi-hole dashboard, queries from your devices should start appearing.
           - /data/letsencrypt:/etc/letsencrypt
     ```
 
-    - /data/npm → NPM config, database, proxy hosts, uploaded certificates, logs
-    - /data/letsencrypt → Let's Encrypt certificates (not used for .lan)
+    - /data/npm and /data/letsencrypt are the bind mounts from step 4 (HDD)
 
 6. Bring up:
 
@@ -1168,6 +1185,8 @@ Take a backup before doing this: `vzdump 101 --storage data-hdd --mode snapshot 
 - [x] Add `nofail` to the `/srv/data` line in the host's `/etc/fstab` (2026-11-17).
 - [x] Run `pvesm set data-hdd --is_mountpoint yes` on the host (2026-11-17).
 - [x] Clean up leftovers on the HDD from earlier attempts (2026-11-17): `/srv/data/containers/npm/` (~19GB old Docker data), `/srv/data/npm/`, `/srv/data/containers/seafile/`.
+- [x] Move NPM data to the HDD, `/srv/data/containers/npm/{data,letsencrypt}` with bind mounts (2026-11-17).
+- [ ] Delete the pre-migration copies inside LXC 102 once NPM is confirmed working: `pct exec 102 -- rm -rf /data/npm.pre-hdd /data/letsencrypt.pre-hdd`.
 
 ### Services
 
@@ -1183,7 +1202,7 @@ Take a backup before doing this: `vzdump 101 --storage data-hdd --mode snapshot 
 - [ ] Send logs to the HDD for Pi-hole, Vaultwarden and NPM. Today they are written inside each container disk (SSD):
   - Pi-hole: `/var/log/pihole` (~40MB)
   - Vaultwarden: Docker logs inside LXC 101
-  - NPM: `/data/npm/logs` and Docker logs inside LXC 102
+  - NPM: its own logs (`/data/npm/logs`) are on the HDD since the 2026-11-17 migration. Docker logs inside LXC 102 are still on the SSD
 - [ ] Premise for every new service (Seafile, Immich, ...): logs go to `/srv/data/containers/<name>` from the start.
 
 ### Backups
