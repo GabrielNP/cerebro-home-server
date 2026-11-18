@@ -60,14 +60,17 @@ This document describes, in a consolidated manner, all the architecture decision
 * HDD Disk (~1TB) - sdb: used for persistent data and logs (`data-hdd`)
 * ext4 instead of ZFS
 * HDD mounted on host at /srv/data
-* Standard structure: /srv/data/containers/<service>
-* Bind-mount from host to LXC (usually mounted as /data inside the container)
+* Standard structure, one folder per service, bind-mounted into its LXC:
+  * /srv/data/containers/<service>/data → the service's persistent data
+  * /srv/data/containers/<service>/logs → the container's whole /var/log
 
 #### Logs
 
 - **Premise:** logs should go to sdb (1TB HDD), avoiding overloading sda (240GB SSD).
-- Standardize this by sending each service's logs to its folder under /srv/data/containers/<name>.
-- Pi-hole and NPM's Docker logs don't follow this yet (see [TODOs](#todos)). Every new service (Seafile, Immich, ...) must follow it from the start.
+- Each container's whole /var/log is a bind mount of /srv/data/containers/<service>/logs. This covers system logs (journal), apt logs and the service's own logs, with no per-app setup. See [Logs on the HDD](#virtualization).
+- Apps running in Docker write their logs to a folder under /var/log (e.g. /var/log/npm, /var/log/vaultwarden).
+- Docker's own container logs can't leave Docker's data folder (SSD), so they are capped at 3 × 10MB per container in `/etc/docker/daemon.json`.
+- Every new service (Seafile, Immich, ...) must follow this from the start.
 
 ### IP Addressing
 
@@ -499,6 +502,27 @@ Confirm Tab
 
 The container assumes a CT ID and appears as Stopped.
 
+4) Logs on the HDD
+
+Do this **before the first start**, on the Proxmox host. It copies the template's /var/log to the HDD and mounts it back as /var/log, so all the container's logs are written to the HDD from day one.
+
+```bash
+ID=<ct id>; NAME=<service name>; MP=<next free mount point, e.g. mp1>
+
+mkdir -p /srv/data/containers/$NAME/logs
+pct mount $ID
+cp -a /var/lib/lxc/$ID/rootfs/var/log/. /srv/data/containers/$NAME/logs/
+chown 100000:100000 /srv/data/containers/$NAME/logs
+rm -rf /var/lib/lxc/$ID/rootfs/var/log/*
+pct unmount $ID
+pct set $ID -$MP /srv/data/containers/$NAME/logs,mp=/var/log
+```
+
+* Copying the template's /var/log (instead of mounting an empty folder) keeps `/var/log/journal`, which systemd needs to keep system logs on disk.
+* `rm -rf .../var/log/*` frees the old copy on the SSD; it would be hidden under the mount anyway.
+* 100000 → the container's root user as seen by the host (unprivileged containers shift UIDs by 100000).
+* Each service section below says which ID, name and mount point to use.
+
 ## Pi-hole
 
 ### Prepare LXC
@@ -564,8 +588,8 @@ The container assumes a CT ID and appears as Stopped.
 
     ```bash
     # On Proxmox host:
-    mkdir -p /srv/data/containers/pihole
-    chown 100000:100000 /srv/data/containers/pihole
+    mkdir -p /srv/data/containers/pihole/data
+    chown -R 100000:100000 /srv/data/containers/pihole
     ```
 
     - 100000 → the container's root user as seen by the host (unprivileged containers shift UIDs by 100000)
@@ -574,11 +598,17 @@ The container assumes a CT ID and appears as Stopped.
 4. Configure bind mount for persistent data
 
     ```bash
-    pct set 100 -mp0 /srv/data/containers/pihole,mp=/etc/pihole
+    pct set 100 -mp0 /srv/data/containers/pihole/data,mp=/etc/pihole
     ```
 
-    - /srv/data/containers/pihole → host (HDD)
+    - /srv/data/containers/pihole/data → host (HDD)
     - /etc/pihole → inside the container: Pi-hole config (`pihole.toml`), blocklists (`gravity.db`) and the long-term query database (`pihole-FTL.db`, which grows over time, so it's good that it's on the HDD)
+
+5. Move logs to the HDD (before the first start)
+
+    Follow [Logs on the HDD](#virtualization) with `ID=100; NAME=pihole; MP=mp1`.
+
+    - Pi-hole's logs go to /var/log/pihole. `pihole.log` records every DNS query (~16MB a day), so it's the biggest log on the server. Pi-hole rotates its own logs (`/etc/pihole/logrotate`).
 
 ### Install service
 
@@ -734,11 +764,15 @@ In the Pi-hole dashboard, queries from your devices should start appearing.
     pct set 102 -mp0 /srv/data/containers/npm/data,mp=/data/npm -mp1 /srv/data/containers/npm/letsencrypt,mp=/data/letsencrypt
     ```
 
-    - /srv/data/containers/npm/data → /data/npm inside the container: NPM config, database, proxy hosts, uploaded certificates and logs
+    - /srv/data/containers/npm/data → /data/npm inside the container: NPM config, database, proxy hosts and uploaded certificates
     - /srv/data/containers/npm/letsencrypt → /data/letsencrypt inside the container: Let's Encrypt certificates (not used for .lan)
     - Docker itself (/data/docker: images, layers, cache) stays on the container disk (SSD). It can always be downloaded again.
 
-5. Start on boot
+5. Move logs to the HDD (before the first start)
+
+    Follow [Logs on the HDD](#virtualization) with `ID=102; NAME=npm; MP=mp2`.
+
+6. Start on boot
 
     NPM is the single entry point for every service (`*.lan` → 192.168.1.13): if it's down, no service is reachable by name.
 
@@ -793,7 +827,12 @@ In the Pi-hole dashboard, queries from your devices should start appearing.
 
     ```json
     {
-      "data-root": "/data/docker"
+      "data-root": "/data/docker",
+      "log-driver": "json-file",
+      "log-opts": {
+        "max-size": "10m",
+        "max-file": "3"
+      }
     }
     ```
 
@@ -805,10 +844,12 @@ In the Pi-hole dashboard, queries from your devices should start appearing.
     Should show `Docker Root Dir: /data/docker`.
 
     - /data/docker is a normal folder inside the container disk (SSD), not a bind mount. Docker images, layers and cache are stored there (~1GB).
+    - `log-opts` → Docker's own container logs (`docker logs`) stay in /data/docker on the SSD, so they're capped at 3 files of 10MB. NPM's real logs go to the HDD (next step).
 
 5. Configure NPM
 
     ```bash
+    mkdir -p /var/log/npm
     nano /data/docker-compose.yml
     ```
 
@@ -827,9 +868,12 @@ In the Pi-hole dashboard, queries from your devices should start appearing.
         volumes:
           - /data/npm:/data
           - /data/letsencrypt:/etc/letsencrypt
+          - /var/log/npm:/data/logs
     ```
 
-    - /data/npm and /data/letsencrypt are the bind mounts from step 4 (HDD)
+    - /data/npm and /data/letsencrypt are the bind mounts from Prepare LXC step 4 (HDD)
+    - /var/log/npm → NPM's logs (one access and error log per proxy host), on the HDD through the /var/log bind mount. NPM rotates them itself.
+    - Docker creates an empty `logs` folder inside /data/npm as the mount point for /var/log/npm. That's expected.
 
 6. Bring up:
 
@@ -1021,10 +1065,14 @@ When Cloudflare is configured with a real domain (e.g. `vault.mydomain.com`), NP
     pct set 101 -mp0 /srv/data/containers/vaultwarden/data,mp=/data/vaultwarden
     ```
 
-    - /srv/data/containers/vaultwarden/data → /data/vaultwarden inside the container: database (`db.sqlite3`), keys (`rsa_key.pem`), attachments and logs
+    - /srv/data/containers/vaultwarden/data → /data/vaultwarden inside the container: database (`db.sqlite3`), keys (`rsa_key.pem`) and attachments
     - Docker itself (/data/docker: images, layers, cache) stays on the container disk (SSD). It can always be downloaded again.
 
-5. Start on boot
+5. Move logs to the HDD (before the first start)
+
+    Follow [Logs on the HDD](#virtualization) with `ID=101; NAME=vaultwarden; MP=mp1`.
+
+6. Start on boot
 
     ```bash
     pct set 101 --onboot 1
@@ -1077,7 +1125,12 @@ When Cloudflare is configured with a real domain (e.g. `vault.mydomain.com`), NP
 
     ```json
     {
-      "data-root": "/data/docker"
+      "data-root": "/data/docker",
+      "log-driver": "json-file",
+      "log-opts": {
+        "max-size": "10m",
+        "max-file": "3"
+      }
     }
     ```
 
@@ -1091,7 +1144,7 @@ When Cloudflare is configured with a real domain (e.g. `vault.mydomain.com`), NP
 5. Configure Vaultwarden
 
     ```bash
-    mkdir -p /data/vaultwarden/logs
+    mkdir -p /var/log/vaultwarden
     nano /data/docker-compose.yml
     ```
 
@@ -1108,15 +1161,16 @@ When Cloudflare is configured with a real domain (e.g. `vault.mydomain.com`), NP
         environment:
           DOMAIN: "https://vault.lan"
           SIGNUPS_ALLOWED: "true"
-          LOG_FILE: "/data/logs/vaultwarden.log"
+          LOG_FILE: "/var/log/vaultwarden/vaultwarden.log"
         volumes:
           - /data/vaultwarden:/data
+          - /var/log/vaultwarden:/var/log/vaultwarden
     ```
 
     - `8080:80` → Vaultwarden listens on 80 inside its Docker container; NPM forwards to port 8080 of the LXC
     - DOMAIN → the address users open. Vaultwarden uses it to build links (attachments, WebAuthn/passkeys)
     - SIGNUPS_ALLOWED → `true` only until your accounts are created (see step 8)
-    - LOG_FILE → logs go to /data/vaultwarden/logs, on the HDD
+    - LOG_FILE → logs go to /var/log/vaultwarden, on the HDD through the /var/log bind mount
     - /data/vaultwarden is the bind mount from Prepare LXC step 4 (HDD)
 
 6. Rotate the log file
@@ -1130,7 +1184,7 @@ When Cloudflare is configured with a real domain (e.g. `vault.mydomain.com`), NP
     Content:
 
     ```
-    /data/vaultwarden/logs/*.log {
+    /var/log/vaultwarden/*.log {
         weekly
         rotate 4
         compress
@@ -1222,7 +1276,7 @@ docker compose ps
 Should show the `vaultwarden` container as `Up` (after about a minute, `(healthy)`).
 
 ```bash
-tail /data/vaultwarden/logs/vaultwarden.log
+tail /var/log/vaultwarden/vaultwarden.log
 ```
 
 Should end with `Rocket has launched from http://0.0.0.0:80`.
@@ -1265,11 +1319,8 @@ Notes:
 
 ### Logs
 
-- [ ] Send logs to the HDD for Pi-hole and NPM. Today they are written inside each container disk (SSD):
-  - Pi-hole: `/var/log/pihole` (~40MB)
-  - Vaultwarden: done (2026-11-17), logs in `/srv/data/containers/vaultwarden/data/logs`
-  - NPM: its own logs (`/data/npm/logs`) are on the HDD since the 2026-11-17 migration. Docker logs inside LXC 102 are still on the SSD
-- [ ] Premise for every new service (Seafile, Immich, ...): logs go to `/srv/data/containers/<name>` from the start.
+- [x] Logs on the HDD for Pi-hole, Vaultwarden and NPM (2026-11-18): each container's /var/log is a bind mount of `/srv/data/containers/<service>/logs`, app logs moved under /var/log, Docker logs capped at 3 × 10MB. Pi-hole's folder was reorganized into `pihole/data` and `pihole/logs`.
+- [ ] Premise for every new service (Seafile, Immich, ...): follow [Logs on the HDD](#virtualization) from the start.
 
 ### Backups
 
