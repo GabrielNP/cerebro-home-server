@@ -27,6 +27,7 @@
 * [Certificates (internal HTTPS)](#certificates-internal-https)
 * [Vaultwarden](#vaultwarden)
 * [Seafile](#seafile)
+* [Maintenance (updates)](#maintenance-updates)
 * [TODOs](#todos)
 
 
@@ -1293,12 +1294,79 @@ Notes:
 
 > To be set up from scratch. A previous attempt was removed.
 
+## Maintenance (updates)
+
+Updates are done by hand for now, so it's clear what changes. A rough cadence is once a month, or right away when a security fix is announced. Updates are one of the few things that can break a working service, so always follow the same order: **check → back up → update → test**.
+
+### 1. Check what's pending
+
+```bash
+# Host:
+apt update && apt list --upgradable
+
+# Each LXC (100, 101, 102):
+pct exec <id> -- bash -c 'apt update && apt list --upgradable'
+
+# Pi-hole's own components (core, web, FTL):
+pct exec 100 -- pihole -v
+```
+
+`pihole -v` shows `(Latest: ...)` next to each version. Pi-hole is **not** updated by apt, so `apt list --upgradable` never shows it.
+
+### 2. Back up first
+
+```bash
+vzdump <id> --storage data-hdd --mode snapshot --compress zstd
+```
+
+- vzdump **doesn't include bind mounts**, so also copy the service's folder: `cp -a /srv/data/containers/<service>/data /srv/data/backups/<service>-pre-update`
+- `pct snapshot` doesn't work on these containers ("snapshot feature is not available"), because of the bind mounts. vzdump plus the folder copy is the rollback point.
+
+### 3. Update
+
+| What | Command | Then |
+| :---- | :---- | :---- |
+| Host | `apt full-upgrade` | Reboot if a new kernel was installed (see below) |
+| Debian packages in an LXC | `pct exec <id> -- bash -c 'apt update && apt full-upgrade -y'` | Restart the container if libc, systemd or openssl changed: `pct reboot <id>` |
+| Pi-hole (core, web, FTL) | `pct exec 100 -- pihole -up` | Test DNS (below) |
+| Vaultwarden / NPM (Docker) | `pct exec <id> -- bash -c 'cd /data && docker compose pull && docker compose up -d'` | Open the web interface |
+
+Notes:
+
+- Both compose files use the `:latest` tag, so `docker compose pull` fetches the newest release. If a new version breaks something, the data is safe on the HDD, but going back means pinning the previous version tag in `docker-compose.yml`.
+- Old images pile up on the container disk. Clean them with `docker image prune -f` inside the container.
+- Update **one guest at a time**, and **Pi-hole last or at a quiet time**: while it restarts, no device on the LAN can resolve names.
+
+### 4. Test
+
+```bash
+# Pi-hole answers DNS and is blocking:
+pct exec 100 -- pihole status
+dig +short @192.168.1.11 example.com
+```
+
+- https://vault.lan opens and you can log in
+- NPM's admin page opens (http://192.168.1.13:81) and the proxy hosts still work
+
+### Host reboot
+
+A kernel update only takes effect after a reboot (`uname -r` shows the running one, `proxmox-boot-tool kernel list` shows the installed ones).
+
+1. Check that no VM is running (`qm list`) and tell whoever uses the LAN: DNS and passwords are down for a few minutes.
+2. `reboot`
+3. After 2-3 minutes: `uname -r`, `pct list` (100, 101, 102 have `onboot`, so they must be running), `systemctl --failed`.
+4. If the new kernel doesn't work, pick the previous one in the boot menu and pin it: `proxmox-boot-tool kernel pin <version>`.
+
+### Automating (later)
+
+`unattended-upgrades` inside the containers can install Debian security updates by itself. It's left for later, after the manual routine feels familiar and backups exist.
+
 ## TODOs
 
 ### Host
 
 - [x] **Fix the Proxmox repository on the host** (2026-11-17). `pve-no-subscription.list` pointed to `bookworm` (Proxmox 8) while the host runs Proxmox 9 (`trixie`), so Proxmox packages were never updated. Replaced by `/etc/apt/sources.list.d/proxmox.sources` (trixie), then `apt full-upgrade` (9.1 → 9.2).
-- [ ] Reboot the host to load the new kernel installed by the upgrade (6.17.2 → 7.0.14, the new default in Proxmox 9.2). If something breaks, pick `6.17.13` in the boot menu and pin it with `proxmox-boot-tool kernel pin 6.17.13-21-pve`.
+- [x] Reboot the host to load the new kernel installed by the upgrade (6.17.2 → 7.0.14, the new default in Proxmox 9.2) (2026-11-18). Booted fine on 7.0.14-29-pve, all containers came back. If something breaks, pick `6.17.13` in the boot menu and pin it with `proxmox-boot-tool kernel pin 6.17.13-21-pve`.
 - [x] Set NPM (102) to start on boot (2026-11-17). Before, it stayed stopped after every host reboot.
 - [x] Add `nofail` to the `/srv/data` line in the host's `/etc/fstab` (2026-11-17).
 - [x] Run `pvesm set data-hdd --is_mountpoint yes` on the host (2026-11-17).
@@ -1308,7 +1376,8 @@ Notes:
 
 ### Services
 
-- [ ] Update Pi-hole (core v6.3 → v6.5, web v6.4 → v6.6.1, FTL v6.4.1 → v6.8): `pct exec 100 -- pihole -up`.
+- [x] Update Pi-hole (2026-11-18): core v6.3 → v6.6, web v6.4 → v6.6.1, FTL v6.4.1 → v6.9, with `pct exec 100 -- pihole -up`.
+- [ ] Update the Debian packages inside the Pi-hole container (100): ~70 pending (Debian 12, including openssl, systemd, openssh, libc6), with `pct exec 100 -- bash -c 'apt update && apt full-upgrade'`. Then check 101 and 102 the same way (`apt list --upgradable`).
 - [x] Rebuild Vaultwarden (101) from scratch (2026-11-17): unprivileged, Docker from Docker's repository with compose, `DOMAIN` set, data and logs on the HDD, starts on boot. The old one was privileged and only held test data.
 - [x] Vaultwarden: close sign-ups (`SIGNUPS_ALLOWED: "false"`) after creating the account (2026-11-17).
 - [x] Delete the old Vaultwarden test data, `/srv/data/containers/vaultwarden.old` (2026-11-17).
@@ -1324,7 +1393,8 @@ Notes:
 
 ### Backups
 
-- [ ] Implement backups. Nothing is scheduled today. The only backups are manual ones of 100, 101 and 102 taken on 2026-11-17 in `/srv/data/dump` (before the Proxmox upgrade).
+- [ ] Implement backups (the manual routine is in [Maintenance](#maintenance-updates)). Nothing is scheduled today. The only backups are manual ones of 100, 101 and 102 taken on 2026-11-17 in `/srv/data/dump` (before the Proxmox upgrade).
+  - Note: LXC snapshots (`pct snapshot`) don't work on containers with these bind mounts ("snapshot feature is not available", seen on 100 on 2026-11-18), so vzdump plus a copy of the bind-mounted folders is the way to get a rollback point.
   - Note: Proxmox backups (vzdump) **don't include bind mounts**. Pi-hole's `/etc/pihole` and Vaultwarden's `/data` (in `/srv/data/containers/`) must be backed up separately.
   - Proxmox backup job for the LXCs (Datacenter > Backup) to data-hdd
   - Retention policy (data-hdd currently keeps all backups forever: `prune-backups keep-all=1`)
