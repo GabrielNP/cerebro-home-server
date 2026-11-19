@@ -956,7 +956,7 @@ The CA lives in `/root/ca` on the host: only root can read it, and no container 
     openssl req -x509 -nodes -newkey rsa:4096 -days 3650 \
       -keyout cerebro-ca.key \
       -out cerebro-ca.crt \
-      -subj "/CN=Cerebro Home CA"
+      -subj "/CN=Cerebro Home Server CA"
 
     chmod 600 cerebro-ca.key
     ```
