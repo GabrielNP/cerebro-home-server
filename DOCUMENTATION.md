@@ -937,6 +937,16 @@ and upload them in NPM: *SSL Certificates* > *Add SSL Certificate* > *Custom* (s
 
 Create your own small CA once, install it on each device once, and sign one certificate per service with it. Every device then trusts every service, now and in the future.
 
+What goes where:
+
+| File | Where it lives | Who needs it |
+| :---- | :---- | :---- |
+| `cerebro-ca.key` (CA private key) | Only on the host, `/root/ca` + backups | Nobody else. Never copy it to a device or to NPM |
+| `cerebro-ca.crt` (CA certificate) | Host, and **every device** that opens the services | Devices, to trust the CA. It's public, safe to share |
+| `<name>.crt` + `<name>.key` (service certificate) | Host, and uploaded to **NPM** | NPM only. Devices never need them |
+
+The CA lives in `/root/ca` on the host: only root can read it, and no container or Proxmox storage uses that folder. (`/srv/data/private` is not an option: Proxmox created it for LXC disks.) The downside is that `/root` is on the SSD and is lost if Proxmox is reinstalled, so the CA files must be backed up (step 1).
+
 1. Create the CA (once, on the Proxmox host)
 
     ```bash
@@ -951,8 +961,16 @@ Create your own small CA once, install it on each device once, and sign one cert
     chmod 600 cerebro-ca.key
     ```
 
-    - `cerebro-ca.key` → the CA's private key. Anyone who has it can create certificates your devices trust. Never copy it to other machines; back it up somewhere safe.
+    - `cerebro-ca.key` → the CA's private key. Anyone who has it can create certificates your devices trust.
     - `cerebro-ca.crt` → the CA certificate, the file you install on devices.
+    - Check it: `openssl x509 -in cerebro-ca.crt -noout -ext basicConstraints` must show `CA:TRUE`.
+
+    **Back up the CA now.** If you lose the key, you must create a new CA and install it again on every device. Both files are tiny. Copy them to the HDD and also keep a copy outside the server (for example as an attachment in Vaultwarden, once it works):
+
+    ```bash
+    mkdir -p /srv/data/backups/ca && chmod 700 /srv/data/backups/ca
+    cp -a /root/ca/cerebro-ca.key /root/ca/cerebro-ca.crt /srv/data/backups/ca/
+    ```
 
 2. Create a certificate for a service (repeat for each service, e.g. vault.lan, seafile.lan)
 
@@ -970,22 +988,60 @@ Create your own small CA once, install it on each device once, and sign one cert
       -days 825 -sha256 \
       -extfile <(printf "subjectAltName=DNS:$NAME\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth") \
       -out $NAME.crt
+
+    chmod 600 $NAME.key
     ```
 
-    - `-days 825` → Apple devices reject server certificates valid for longer than 825 days. Renew before it expires.
-    - Check the result: `openssl x509 -in $NAME.crt -noout -ext subjectAltName` should show `DNS:vault.lan`.
+    - `-days 825` → Apple devices reject server certificates valid for longer than 825 days. Renew before it expires (see [Renewing](#renewing-a-certificate)).
+    - The command uses `<( ... )`, which only works in bash (the host's default shell).
+    - Check the SAN: `openssl x509 -in $NAME.crt -noout -ext subjectAltName` should show `DNS:vault.lan`.
+    - Check it was signed by your CA: `openssl verify -CAfile cerebro-ca.crt $NAME.crt` should answer `OK`.
 
-3. Upload to NPM: *SSL Certificates* > *Add SSL Certificate* > *Custom*
+3. Copy the files to the computer you use to open NPM's web page
+
+    Run this **on your computer** (not on the host), in a folder you'll delete afterwards:
+
+    ```bash
+    scp root@192.168.1.10:/root/ca/vault.lan.crt root@192.168.1.10:/root/ca/vault.lan.key .
+    scp root@192.168.1.10:/root/ca/cerebro-ca.crt .
+    ```
+
+    - Windows 10/11 has `scp` in PowerShell. Otherwise use WinSCP.
+    - `vault.lan.key` is a private key: delete it from your computer once it's uploaded to NPM.
+
+4. Upload to NPM: *SSL Certificates* > *Add SSL Certificate* > *Custom*
+    - Name → `vault.lan (local CA)`, so it's not confused with the old self-signed one
     - Certificate Key → `<name>.key`
     - Certificate → `<name>.crt`
     - Intermediate Certificate → `cerebro-ca.crt`
 
-4. Install `cerebro-ca.crt` on each device (once)
+5. Use it in the proxy host
+
+    NPM keeps serving the old certificate until you change this: *Proxy Hosts* > *⋮* > *Edit* on the service > *SSL* tab > *SSL Certificate* > pick the new one > tick *Force SSL* > *Save*.
+
+    When everything works, delete the old self-signed certificate from *SSL Certificates*.
+
+6. Install `cerebro-ca.crt` on each device (once)
+
+    Get the file to the device first (USB cable, `scp`, or a file transfer you trust). Only the `.crt`; never the `.key`.
+
     - **Windows:** double-click the file > *Install Certificate* > *Local Machine* > *Place all certificates in the following store* > *Trusted Root Certification Authorities*
     - **Android:** *Settings* > *Security* > *Encryption & credentials* > *Install a certificate* > *CA certificate*
     - **iPhone/iPad:** open the file to install the profile, then *Settings* > *General* > *About* > *Certificate Trust Settings* > enable it
     - **Linux:** `cp cerebro-ca.crt /usr/local/share/ca-certificates/ && update-ca-certificates`
     - **Firefox** (any OS) uses its own store: *Settings* > *Privacy & Security* > *Certificates* > *View Certificates* > *Authorities* > *Import*
+
+    Restart the browser afterwards.
+
+7. Test
+
+    - From a device with the CA installed, open https://vault.lan: no warning, and the padlock's certificate details show *Cerebro Home CA* as the issuer.
+    - From the command line: `curl --cacert cerebro-ca.crt https://vault.lan` must connect without errors.
+    - Apps (Bitwarden, Seafile client): Android apps often ignore CAs installed by the user, so test the Bitwarden Android app separately. If it refuses, note it here.
+
+#### Renewing a certificate
+
+A service certificate lasts 825 days (the CA, 10 years). Before it expires, repeat step 2 for the same `NAME` (it overwrites the old files), upload the new one in NPM (step 4), switch the proxy host to it (step 5) and delete the old one. Devices need nothing, since they trust the CA, not the certificate. Check the expiry date with `openssl x509 -in <name>.crt -noout -enddate`.
 
 ### Alternative for the future
 
@@ -1396,6 +1452,7 @@ A kernel update only takes effect after a reboot (`uname -r` shows the running o
 - [ ] Implement backups (the manual routine is in [Maintenance](#maintenance-updates)). Nothing is scheduled today. The only backups are manual ones of 100, 101 and 102 taken on 2026-11-17 in `/srv/data/dump` (before the Proxmox upgrade).
   - Note: LXC snapshots (`pct snapshot`) don't work on containers with these bind mounts ("snapshot feature is not available", seen on 100 on 2026-11-18), so vzdump plus a copy of the bind-mounted folders is the way to get a rollback point.
   - Note: Proxmox backups (vzdump) **don't include bind mounts**. Pi-hole's `/etc/pihole` and Vaultwarden's `/data` (in `/srv/data/containers/`) must be backed up separately.
+  - Include the local CA (`/root/ca`, at least `cerebro-ca.key` and `cerebro-ca.crt`). Losing the key means installing a new CA on every device.
   - Proxmox backup job for the LXCs (Datacenter > Backup) to data-hdd
   - Retention policy (data-hdd currently keeps all backups forever: `prune-backups keep-all=1`)
   - Copy to a second disk or off-site (data-hdd is on the same server, so it doesn't protect against losing the server)
