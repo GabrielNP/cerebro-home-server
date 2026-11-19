@@ -1377,11 +1377,11 @@ A kernel update only takes effect after a reboot (`uname -r` shows the running o
 ### Services
 
 - [x] Update Pi-hole (2026-11-18): core v6.3 → v6.6, web v6.4 → v6.6.1, FTL v6.4.1 → v6.9, with `pct exec 100 -- pihole -up`.
-- [ ] Update the Debian packages inside the Pi-hole container (100): ~70 pending (Debian 12, including openssl, systemd, openssh, libc6), with `pct exec 100 -- bash -c 'apt update && apt full-upgrade'`. Then check 101 and 102 the same way (`apt list --upgradable`).
+- [x] Update the Debian packages inside the Pi-hole container (100) (2026-11-19): ~70 packages, with `pct exec 100 -- bash -c 'apt update && apt full-upgrade'`. 101 and 102 had nothing pending.
 - [x] Rebuild Vaultwarden (101) from scratch (2026-11-17): unprivileged, Docker from Docker's repository with compose, `DOMAIN` set, data and logs on the HDD, starts on boot. The old one was privileged and only held test data.
 - [x] Vaultwarden: close sign-ups (`SIGNUPS_ALLOWED: "false"`) after creating the account (2026-11-17).
 - [x] Delete the old Vaultwarden test data, `/srv/data/containers/vaultwarden.old` (2026-11-17).
-- [ ] Vaultwarden: enable two-step login (*Settings → Security → Two-step login*) with an authenticator app, and keep the recovery code on paper.
+- [x] Vaultwarden: enable two-step login (*Settings → Security → Two-step login*) with an authenticator app, and keep the recovery code on paper.
 - [ ] Test whether NPM (102) works without `lxc.apparmor.profile: unconfined`, `lxc.cgroup2.devices.allow: a` and `lxc.mount.auto: proc:rw sys:rw` (remove one at a time, restart, test).
 - [ ] Migrate certificates to the local CA (see [Certificates](#certificates-internal-https)). Required before using the Bitwarden apps or Seafile sync clients.
 - [ ] Seafile: set up from scratch (IP 192.168.1.14, DNS record already exists in Pi-hole).
