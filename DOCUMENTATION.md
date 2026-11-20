@@ -95,7 +95,7 @@ This document describes, in a consolidated manner, all the architecture decision
 - Running in a dedicated LXC
 - Ports: 80/443 (proxy), 81 (admin panel)
 - Responsible for all internal HTTPS
-- Self-signed internal certificates (OpenSSL), see [Certificates](#certificates-internal-https)
+- Internal certificates signed by a local CA (OpenSSL), see [Certificates](#certificates-internal-https)
 - Let's Encrypt NOT used for .lan domains
 
 ### External Access (Cloudflare)
@@ -524,6 +524,10 @@ pct set $ID -$MP /srv/data/containers/$NAME/logs,mp=/var/log
 * 100000 → the container's root user as seen by the host (unprivileged containers shift UIDs by 100000).
 * Each service section below says which ID, name and mount point to use.
 
+5) HTTPS certificate
+
+For every service that is reached through NPM with a `.lan` name (all of them), once the service is installed and answers on its own IP and port: create its certificate with the local CA and use it in its NPM proxy host, following [Certificates](#certificates-internal-https) (steps 2 to 5, then test with step 7). Devices that already have the CA installed need nothing.
+
 ## Pi-hole
 
 ### Prepare LXC
@@ -897,43 +901,19 @@ Should show the `nginx-proxy-manager` container as `Up`.
 
 ## Certificates (internal HTTPS)
 
-`.lan` is not a public domain, so Let's Encrypt can't issue certificates for it. Internal HTTPS uses certificates we create ourselves with OpenSSL and upload to NPM as *Custom* certificates.
+`.lan` is not a public domain, so Let's Encrypt can't issue certificates for it. Internal HTTPS uses a small local Certificate Authority (CA) we create ourselves with OpenSSL: one CA, one certificate per service, uploaded to NPM as *Custom* certificates.
 
-### Current method (in use)
+**For every new service**, follow steps 2 to 5 below (create the certificate, copy it, upload it to NPM, use it in the proxy host) and test it with step 7. Devices that already have the CA installed (step 6) need nothing.
 
-One self-signed certificate per service, valid for 10 years. Generated inside NPM's Docker container, so the files end up in `/data/npm/certs/<service>/` inside LXC 102:
+### Why not self-signed certificates
 
-```bash
-# On LXC 102:
-docker exec -it nginx-proxy-manager bash
+The first attempt was one self-signed certificate per service. It was replaced by the local CA because:
 
-# Inside the NPM docker container:
-mkdir -p /data/certs/vault
-cd /data/certs/vault
+- A self-signed certificate with only a Common Name (CN) and no *Subject Alternative Name* (SAN) is rejected by modern browsers (Chrome, Edge, Safari) and Android, even if you trust it manually.
+- Every device had to trust every certificate one by one.
+- Apps (Bitwarden, Seafile sync clients) refuse self-signed certificates.
 
-openssl req -x509 -nodes -days 3650 \
-  -newkey rsa:2048 \
-  -keyout vault.lan.key \
-  -out vault.lan.crt \
-  -subj "/CN=vault.lan"
-```
-
-Then copy the two files to your computer, for example from that computer:
-
-```bash
-ssh root@192.168.1.10 "pct exec 102 -- cat /data/npm/certs/vault/vault.lan.crt" > vault.lan.crt
-ssh root@192.168.1.10 "pct exec 102 -- cat /data/npm/certs/vault/vault.lan.key" > vault.lan.key
-```
-
-and upload them in NPM: *SSL Certificates* > *Add SSL Certificate* > *Custom* (see the Vaultwarden section).
-
-**Limitations of this method**
-
-- The certificate has only a Common Name (CN), no *Subject Alternative Name* (SAN). Modern browsers (Chrome, Edge, Safari) and Android ignore the CN and reject the certificate even if you trust it manually. Only "accept the risk and continue" works.
-- Self-signed certificates are rejected by apps: the Bitwarden mobile/desktop apps (Vaultwarden) and the Seafile sync clients will refuse to connect.
-- Every service has its own certificate, so every device has to trust every certificate one by one.
-
-### Recommended method: local Certificate Authority (CA)
+### Local Certificate Authority (CA) (in use)
 
 Create your own small CA once, install it on each device once, and sign one certificate per service with it. Every device then trusts every service, now and in the future.
 
@@ -1010,7 +990,7 @@ The CA lives in `/root/ca` on the host: only root can read it, and no container 
     - `vault.lan.key` is a private key: delete it from your computer once it's uploaded to NPM.
 
 4. Upload to NPM: *SSL Certificates* > *Add SSL Certificate* > *Custom*
-    - Name → `vault.lan (local CA)`, so it's not confused with the old self-signed one
+    - Name → `vault.lan (local CA)`, so it's not confused with an older one
     - Certificate Key → `<name>.key`
     - Certificate → `<name>.crt`
     - Intermediate Certificate → `cerebro-ca.crt`
@@ -1019,7 +999,7 @@ The CA lives in `/root/ca` on the host: only root can read it, and no container 
 
     NPM keeps serving the old certificate until you change this: *Proxy Hosts* > *⋮* > *Edit* on the service > *SSL* tab > *SSL Certificate* > pick the new one > tick *Force SSL* > *Save*.
 
-    When everything works, delete the old self-signed certificate from *SSL Certificates*.
+    When everything works, delete the old certificate from *SSL Certificates* (if this one replaces another, for example when renewing).
 
 6. Install `cerebro-ca.crt` on each device (once)
 
@@ -1035,7 +1015,7 @@ The CA lives in `/root/ca` on the host: only root can read it, and no container 
 
 7. Test
 
-    - From a device with the CA installed, open https://vault.lan: no warning, and the padlock's certificate details show *Cerebro Home CA* as the issuer.
+    - From a device with the CA installed, open https://vault.lan: no warning, and the padlock's certificate details show *Cerebro Home Server CA* as the issuer.
     - From the command line: `curl --cacert cerebro-ca.crt https://vault.lan` must connect without errors.
     - Apps (Bitwarden, Seafile client): Android apps often ignore CAs installed by the user, so test them separately from the browser.
 
@@ -1286,17 +1266,12 @@ When Cloudflare is configured with a real domain (e.g. `vault.mydomain.com`), NP
 
 #### Create SSL certificate
 
-Create the certificate for `vault.lan` as described in [Certificates](#certificates-internal-https), then import it into NPM:
+Create the certificate for `vault.lan` and import it into NPM following steps 2 to 4 of [Certificates](#certificates-internal-https) (with `NAME=vault.lan`). In NPM's *Add SSL Certificate* > *Custom*:
 
-1. Go to SSL Certificates
-2. Click Add SSL Certificate
-3. Choose Custom
-
-Fill in:
-- Certificate name: vault-internal
-- Certificate Key → upload vault.lan.key
-- Certificate → upload vault.lan.crt
-- Intermediate Certificate → leave empty (or `cerebro-ca.crt` if using the local CA)
+- Certificate name: `vault.lan (local CA)`
+- Certificate Key → upload `vault.lan.key`
+- Certificate → upload `vault.lan.crt`
+- Intermediate Certificate → upload `cerebro-ca.crt`
 
 #### Configure proxy host
 
@@ -1351,6 +1326,8 @@ Notes:
 ## Seafile
 
 > To be set up from scratch. A previous attempt was removed.
+
+HTTPS: create the certificate for `seafile.lan` and use it in its proxy host following [Certificates](#certificates-internal-https) (steps 2 to 5), and follow [Logs on the HDD](#virtualization) from the start.
 
 ## Maintenance (updates)
 
@@ -1441,7 +1418,7 @@ A kernel update only takes effect after a reboot (`uname -r` shows the running o
 - [x] Delete the old Vaultwarden test data, `/srv/data/containers/vaultwarden.old` (2026-11-17).
 - [x] Vaultwarden: enable two-step login (*Settings → Security → Two-step login*) with an authenticator app, and keep the recovery code on paper.
 - [ ] Test whether NPM (102) works without `lxc.apparmor.profile: unconfined`, `lxc.cgroup2.devices.allow: a` and `lxc.mount.auto: proc:rw sys:rw` (remove one at a time, restart, test).
-- [ ] Migrate certificates to the local CA (see [Certificates](#certificates-internal-https)). Required before using the Bitwarden apps or Seafile sync clients.
+- [x] Migrate certificates to the local CA (see [Certificates](#certificates-internal-https)). Required before using the Bitwarden apps or Seafile sync clients.
 - [ ] Seafile: set up from scratch (IP 192.168.1.14, DNS record already exists in Pi-hole).
 
 ### Logs
