@@ -1037,7 +1037,9 @@ The CA lives in `/root/ca` on the host: only root can read it, and no container 
 
     - From a device with the CA installed, open https://vault.lan: no warning, and the padlock's certificate details show *Cerebro Home CA* as the issuer.
     - From the command line: `curl --cacert cerebro-ca.crt https://vault.lan` must connect without errors.
-    - Apps (Bitwarden, Seafile client): Android apps often ignore CAs installed by the user, so test the Bitwarden Android app separately. If it refuses, note it here.
+    - Apps (Bitwarden, Seafile client): Android apps often ignore CAs installed by the user, so test them separately from the browser.
+
+    > **Observation (2026-11-20): the Bitwarden Android app doesn't trust this CA.** With `cerebro-ca.crt` installed on the phone, https://vault.lan opens without warnings in the phone's browser, but the Bitwarden app, with *Self-hosted* server URL `https://vault.lan`, fails to log in saying it couldn't verify the server certificate. Likely cause: since Android 7, apps ignore CAs installed by the user unless they opt in, while browsers accept them. The app's *Import certificate* option is not a fix, because it is for client certificates. For now the phone uses the web vault in the browser. Real fix: a certificate from a public CA (Let's Encrypt with the DNS challenge, see [Alternative for the future](#alternative-for-the-future)). The Seafile Android client will probably behave the same way.
 
 #### Renewing a certificate
 
