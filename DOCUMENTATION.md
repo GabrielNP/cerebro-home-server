@@ -744,14 +744,10 @@ In the Pi-hole dashboard, queries from your devices should start appearing.
     ```ini
     features: keyctl=1,nesting=1
     unprivileged: 1
-
-    lxc.apparmor.profile: unconfined
-    lxc.cgroup2.devices.allow: a
-    lxc.mount.auto: proc:rw sys:rw
     ```
 
     - `keyctl=1,nesting=1` → required for Docker inside an unprivileged LXC
-    - The last 3 lines remove most of the container's isolation. They were added during troubleshooting and may not be needed (see [TODOs](#todos))
+    - No extra `lxc.*` lines are needed. Earlier versions of this guide added `lxc.apparmor.profile: unconfined`, `lxc.cgroup2.devices.allow: a` and `lxc.mount.auto: proc:rw sys:rw` during troubleshooting. They remove most of the container's isolation, and NPM was tested without them (2026-11-20), so don't add them.
 
 3. Create persistent data directories
 
@@ -1417,14 +1413,14 @@ A kernel update only takes effect after a reboot (`uname -r` shows the running o
 - [x] Vaultwarden: close sign-ups (`SIGNUPS_ALLOWED: "false"`) after creating the account (2026-11-17).
 - [x] Delete the old Vaultwarden test data, `/srv/data/containers/vaultwarden.old` (2026-11-17).
 - [x] Vaultwarden: enable two-step login (*Settings → Security → Two-step login*) with an authenticator app, and keep the recovery code on paper.
-- [ ] Test whether NPM (102) works without `lxc.apparmor.profile: unconfined`, `lxc.cgroup2.devices.allow: a` and `lxc.mount.auto: proc:rw sys:rw` (remove one at a time, restart, test).
+- [x] Test whether NPM (102) works without `lxc.apparmor.profile: unconfined`, `lxc.cgroup2.devices.allow: a` and `lxc.mount.auto: proc:rw sys:rw` (2026-11-20). It does: the three lines were commented out one at a time (full `pct stop` and `pct start` after each) and Docker, NPM and the proxy hosts kept working. 102 is now confined like the other containers (`/sys` read-only).
 - [x] Migrate certificates to the local CA (see [Certificates](#certificates-internal-https)). Required before using the Bitwarden apps or Seafile sync clients.
+- [ ] Point the containers' DNS to Pi-hole (192.168.1.11) instead of the router. Today the containers use the host's resolver (`nameserver 192.168.1.1`), and the router often doesn't answer DNS queries: NPM's Docker logs "failed to query external DNS server ... i/o timeout" (273 times since 2026-10-22), so its lookups (Cloudflare IP lists, GitHub version check) sometimes fail. Possible fix: set *DNS servers* in each container's DNS options (`pct set <id> --nameserver 192.168.1.11`). Careful with Pi-hole (100) itself: it must not depend on its own DNS to start.
 - [ ] Seafile: set up from scratch (IP 192.168.1.14, DNS record already exists in Pi-hole).
 
 ### Logs
 
 - [x] Logs on the HDD for Pi-hole, Vaultwarden and NPM (2026-11-18): each container's /var/log is a bind mount of `/srv/data/containers/<service>/logs`, app logs moved under /var/log, Docker logs capped at 3 × 10MB. Pi-hole's folder was reorganized into `pihole/data` and `pihole/logs`.
-- [ ] Premise for every new service (Seafile, Immich, ...): follow [Logs on the HDD](#virtualization) from the start.
 
 ### Backups
 
