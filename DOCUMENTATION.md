@@ -79,7 +79,7 @@ This document describes, in a consolidated manner, all the architecture decision
 - Pi-hole: 192.168.1.11
 - Vaultwarden: 192.168.1.12
 - Nginx Proxy Manager: 192.168.1.13
-- Seafile: 192.168.1.14 (planned)
+- Seafile: 192.168.1.14
 - IPs defined outside the router's DHCP range (pool 192.168.1.64 to 192.168.1.253, 1 hour lease) to avoid conflicts
 
 ### DNS (Pi-hole)
@@ -674,7 +674,7 @@ Web interface: `http://192.168.1.11/admin` (also `https://192.168.1.11/admin` wi
     | Domain | IP | Reason |
     | :---- | :---- | :---- |
     | vault.lan | 192.168.1.13 | Vaultwarden, through NPM |
-    | seafile.lan | 192.168.1.13 | Seafile (planned), through NPM |
+    | seafile.lan | 192.168.1.13 | Seafile, through NPM |
 
     All records point to NPM, never directly to the service.
 
@@ -1326,9 +1326,227 @@ Notes:
 
 ## Seafile
 
-> To be set up from scratch. A previous attempt was removed.
+> Set up from scratch on 2026-11-20 (a previous attempt was removed). Seafile 13.0 (Community Edition) in Docker, behind NPM at https://seafile.lan. SeaDoc, the notification server, Seafile AI and the Caddy frontend are not used.
 
 HTTPS: create the certificate for `seafile.lan` and use it in its proxy host following [Certificates](#certificates-internal-https) (steps 2 to 5), and follow [Logs on the HDD](#virtualization) from the start.
+
+### Prepare LXC
+
+1. Create the LXC container (step by step from [virtualization configuration](#virtualization), steps 1 to 3).
+
+    General:
+    - CT ID: 103
+    - Hostname: seafile
+    - Unprivileged: true
+    - Nesting: true
+    - Password: <define>
+    - SSH public key: empty
+
+    Template:
+    - Debian 12
+
+    Disks:
+    - Storage: local-lvm
+    - Disk size: 10GB (OS and Docker images only; user files go to the HDD)
+
+    CPU:
+    - Cores: 2
+
+    Memory:
+    - 2048MB (Seafile runs as several Docker containers: Seafile, MariaDB and a cache)
+    - Swap: 1024MB
+
+    Network:
+    - Name: eth0
+    - Bridge: vmbr0
+    - IPv4: Static 192.168.1.14/24, Gateway 192.168.1.1
+    - IPv6: None
+
+    DNS:
+    - DNS domain: lan
+    - DNS servers: 192.168.1.11 1.1.1.1
+
+    Or simply run:
+    ```bash
+    pct create 103 local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst \
+    --hostname seafile \
+    --cores 2 \
+    --memory 2048 \
+    --swap 1024 \
+    --net0 name=eth0,bridge=vmbr0,ip=192.168.1.14/24,gw=192.168.1.1,firewall=1,type=veth \
+    --nameserver "192.168.1.11 1.1.1.1" \
+    --searchdomain lan \
+    --rootfs local-lvm:10 \
+    --unprivileged 1 \
+    --features keyctl=1,nesting=1 \
+    --onboot 1 \
+    --password
+    ```
+
+    - `keyctl=1,nesting=1` → required for Docker inside an unprivileged LXC. No extra `lxc.*` settings are needed (tested on NPM, see [TODOs](#todos)).
+    - `--onboot 1` → starts on boot.
+    - **Don't start it yet.** Logs go to the HDD first (next step).
+    - Check `pct config 103` before going on: a wrong `ip=` (for example another container's address) would conflict on the first start. Fix it with `pct set 103 --net0 ...` (keep the same `hwaddr`).
+
+2. Move logs to the HDD (before the first start)
+
+    Follow [Logs on the HDD](#virtualization) with `ID=103; NAME=seafile; MP=mp0`.
+
+    - The standard procedure says "next free mount point". The container had none yet, so logs take `mp0` and data takes `mp1` (the reverse of Vaultwarden and NPM, where data was added first). The number is only a label and doesn't change how it works.
+
+3. Create persistent data directory and bind mount
+
+    ```bash
+    # On Proxmox host:
+    mkdir -p /srv/data/containers/seafile/data
+    chown 100000:100000 /srv/data/containers/seafile/data
+    pct set 103 -mp1 /srv/data/containers/seafile/data,mp=/opt/seafile-data
+    ```
+
+    - /srv/data/containers/seafile/data → /opt/seafile-data inside the container: Seafile's files, libraries and configuration (the database has its own mount, step 4). Docker itself (images, layers) stays on the container disk (SSD).
+    - 100000 → the container's root user as seen by the host (unprivileged containers shift UIDs by 100000). Keep this ownership.
+    - `/opt/seafile-data` is the path Seafile's own Docker documentation uses.
+
+4. Create the database directory and bind mount
+
+    Seafile's compose files keep MariaDB's data in a separate path (`/opt/seafile-mysql/db`), outside `/opt/seafile-data`. Without a mount there it would end up on the container disk (SSD). It holds the libraries' metadata and users, so it goes to the HDD too:
+
+    ```bash
+    # On Proxmox host:
+    mkdir -p /srv/data/containers/seafile/mysql
+    chown 100000:100000 /srv/data/containers/seafile/mysql
+    pct set 103 -mp2 /srv/data/containers/seafile/mysql,mp=/opt/seafile-mysql
+    ```
+
+    - /srv/data/containers/seafile/mysql → /opt/seafile-mysql inside the container (the compose file stores the DB in `/opt/seafile-mysql/db`).
+    - After the first start MariaDB changes the owner of its own files to its `mysql` user (UID 999 in the image), which the host sees as `100999`. That's expected, don't "fix" it.
+    - Both folders must be included in the manual backups (vzdump doesn't include bind mounts).
+
+5. Verify the container config
+
+    ```bash
+    pct config 103
+    ```
+
+    Expect `mp0` (logs → /var/log), `mp1` (data → /opt/seafile-data), `mp2` (database → /opt/seafile-mysql), `onboot: 1`, `unprivileged: 1`, `features: keyctl=1,nesting=1`, `ip=192.168.1.14/24`, `nameserver: 192.168.1.11 1.1.1.1`, `searchdomain: lan`.
+
+### Install service
+
+Same first steps as [Vaultwarden](#install-service) (enter the container, update, install Docker from Docker's repository, set `data-root` to `/data/docker` with capped logs). Docker's images (Seafile's alone is ~2.5GB) stay on the container disk (SSD), hence its 10GB.
+
+1. Download Seafile's compose files (official Docker setup for 13.0, https://manual.seafile.com/latest/setup/setup_ce_by_docker/)
+
+    ```bash
+    mkdir -p /opt/seafile && cd /opt/seafile
+    wget -O .env https://manual.seafile.com/13.0/repo/docker/ce/env
+    wget https://manual.seafile.com/13.0/repo/docker/ce/seafile-server.yml
+    ```
+
+    - The official guide also downloads `caddy.yml` and `seadoc.yml`. Neither is used here: NPM already does HTTPS (so no Caddy), and SeaDoc (collaborative documents) is off for now.
+
+2. Edit `/opt/seafile/.env`
+
+    | Variable | Value | Why |
+    | :---- | :---- | :---- |
+    | `COMPOSE_FILE` | `'seafile-server.yml'` | Only the server file. Without `caddy.yml` and `seadoc.yml` |
+    | `SEAFILE_SERVER_HOSTNAME` | `seafile.lan` | Seafile builds its public URLs from it |
+    | `SEAFILE_SERVER_PROTOCOL` | `https` | TLS ends at NPM, but the links Seafile gives out must be https |
+    | `TIME_ZONE` | `Europe/Lisbon` | |
+    | `ENABLE_SEADOC` | `false` | SeaDoc not used for now |
+    | `JWT_PRIVATE_KEY` | random string, one line, 32+ characters | `openssl rand -hex 24` |
+    | `SEAFILE_MYSQL_DB_PASSWORD` | strong password | Seafile's database user |
+    | `INIT_SEAFILE_MYSQL_ROOT_PASSWORD` | strong password | Only used on the first start |
+    | `INIT_SEAFILE_ADMIN_EMAIL` / `INIT_SEAFILE_ADMIN_PASSWORD` | the admin account | Only used on the first start |
+
+    - Volumes keep the defaults: `/opt/seafile-data` (Seafile data, `mp1`) and `/opt/seafile-mysql/db` (MariaDB, `mp2`), both on the HDD.
+    - `JWT_PRIVATE_KEY` must be a plain random string on **one line**. (An SSH private key pasted by mistake breaks the file: `docker compose` fails with "unexpected character in variable name".)
+    - Keep the passwords in Vaultwarden. They are not in this guide.
+    - `REDIS_PASSWORD` stays empty: Redis has no published port and is only reachable inside Seafile's Docker network.
+
+3. Edit `/opt/seafile/seafile-server.yml`
+
+    In the `seafile:` service, enable the port mapping (the file has it commented):
+
+    ```yaml
+        ports:
+          - "80:80"
+    ```
+
+    - Keep the same indentation as `image:` and `volumes:` (4 spaces for the key, 6 for the list item). An extra space makes the file invalid (`mapping values are not allowed in this context`).
+    - Delete the `labels:` block that mentions `caddy`, if the file has one.
+    - Check the file and the `.env` without printing the secrets: `docker compose config -q` (it prints nothing when everything is fine).
+    - Port 80 is the one NPM forwards to.
+
+4. Back up before the first start
+
+    The stack was empty, so this was a rollback point and a rehearsal, as in [Maintenance](#maintenance-updates): `vzdump 103 --storage data-hdd --mode snapshot --compress zstd` (~350MB) plus a copy of `/srv/data/containers/seafile/{data,mysql}`. Repeat it **before uploading real data**.
+
+5. Bring up
+
+    ```bash
+    cd /opt/seafile
+    docker compose up -d
+    docker compose logs -f seafile
+    ```
+
+    - The first start downloads the images and creates the databases and the admin account (a few minutes). Wait for `Seahub is started`.
+    - Check: `docker ps` shows `seafile`, `seafile-mysql` (both `healthy`) and `seafile-redis`; `curl -I http://192.168.1.14/` answers `302` to `/accounts/login/`.
+    - The three containers use `restart: unless-stopped`, and the LXC has `onboot`, so they come back after a reboot.
+    - After the first start the database's files belong to `100999` on the host (MariaDB's `mysql` user, UID 999 + 100000). That's expected.
+    - To add an admin later: `docker exec -it seafile /opt/seafile/seafile-server-latest/reset-admin.sh`
+
+### Configure Seafile on NPM
+
+#### Create SSL certificate
+
+Create the certificate for `seafile.lan` and import it into NPM following steps 2 to 4 of [Certificates](#certificates-internal-https) (with `NAME=seafile.lan`). In NPM's *Add SSL Certificate* > *Custom*:
+
+- Certificate name: `seafile.lan (local CA)`
+- Certificate Key → upload `seafile.lan.key` (delete it from your computer afterwards)
+- Certificate → upload `seafile.lan.crt`
+- Intermediate Certificate → upload `cerebro-ca.crt`
+
+#### Configure proxy host
+
+If an older proxy host or certificate for `seafile.lan` exists, delete them first (the proxy host first, then the certificate).
+
+*Proxy Hosts* > *Add Proxy Host*:
+
+"Details" Tab
+
+- Domain Names: seafile.lan
+- Scheme: http
+- Forward Hostname / IP: 192.168.1.14
+- Forward Port: 80
+- Cache Assets: false
+- Block Common Exploits: true
+- Websockets Support: true
+
+"SSL" Tab
+
+- SSL Certificate: `seafile.lan (local CA)`
+- Force SSL: true
+- HTTP/2 Support: true
+
+Notes:
+* No custom Nginx settings are needed for uploads. NPM's Nginx already allows request bodies up to 2000MB (`client_max_body_size` in `nginx.conf`), and Seafile uploads files in chunks.
+
+### Configure DNS record in Pi-hole
+
+`seafile.lan` → `192.168.1.13` (NPM, not the container) already exists, see [DNS (Pi-hole)](#dns-pi-hole).
+
+### Verify
+
+* From the host: `curl --cacert /root/ca/cerebro-ca.crt https://seafile.lan/api2/ping/` answers `"pong"`, and `.../seafhttp/protocol-version` answers `{"version": 2}` (the file server path, used by uploads and downloads).
+* From a device with the CA installed: https://seafile.lan opens without warnings and the admin account can log in.
+* Create a library, upload and download a file, and create a download link. The link must start with `https://seafile.lan/seafhttp/`.
+* Inside the container: name resolution uses Pi-hole (`getent hosts vault.lan` → `192.168.1.13`), see the DNS tab in [Virtualization](#virtualization).
+
+Notes:
+* **`seafile.lan` resolves to the container itself inside the container.** Proxmox adds `192.168.1.14 seafile.lan seafile` to the container's `/etc/hosts` (hostname + search domain `lan`), so there `seafile.lan` is `192.168.1.14`, not NPM. This turned out not to matter: in Seafile 13 `SERVICE_URL` and `FILE_SERVER_ROOT` are built from `SEAFILE_SERVER_PROTOCOL` and `SEAFILE_SERVER_HOSTNAME` (`seahub/settings.py`, not in the web settings page or `seahub_settings.py`) and are only given to clients. Seafile's own internal calls use `http://127.0.0.1`. If a component ever fails connecting to `https://seafile.lan` from inside the stack, add `extra_hosts` to that service in `seafile-server.yml`. Note that pointing it to NPM (`192.168.1.13`) would need the local CA to be trusted inside that Docker container.
+* **Seafile Android client:** it will probably reject the local CA, like the Bitwarden app (see [Certificates](#certificates-internal-https), step 7). Not tested. The web interface and the desktop clients work with the CA installed.
+* **Backups:** nothing is scheduled. Back up `/srv/data/containers/seafile/{data,mysql}` (vzdump doesn't include them) together with a vzdump of 103. The database (`mysql`) holds the libraries' metadata, so the two folders must be copied together, taken while Seafile is stopped (`docker compose stop` in `/opt/seafile`) for a consistent copy.
+* **Logs:** the system logs are in `/srv/data/containers/seafile/logs` (the container's `/var/log`), Seafile's own logs in `/srv/data/containers/seafile/data/seafile/logs`, and Docker's logs are capped at 3 × 10MB.
 
 ## Maintenance (updates)
 
@@ -1421,7 +1639,9 @@ A kernel update only takes effect after a reboot (`uname -r` shows the running o
 - [x] Test whether NPM (102) works without `lxc.apparmor.profile: unconfined`, `lxc.cgroup2.devices.allow: a` and `lxc.mount.auto: proc:rw sys:rw` (2026-11-20). It does: the three lines were commented out one at a time (full `pct stop` and `pct start` after each) and Docker, NPM and the proxy hosts kept working. 102 is now confined like the other containers (`/sys` read-only).
 - [x] Migrate certificates to the local CA (see [Certificates](#certificates-internal-https)). Required before using the Bitwarden apps or Seafile sync clients.
 - [x] Point the DNS of the containers and the host to Pi-hole (2026-11-20). 101 and 102 use `192.168.1.11` then `1.1.1.1`, Pi-hole (100) uses only `1.1.1.1`, and the host uses `192.168.1.11` then `1.1.1.1` (`pvesh set /nodes/pve/dns ...`). Before, they all used the router (`192.168.1.1`), which doesn't know `.lan` and sometimes times out (NPM logged 273 DNS timeouts since 2026-10-22).
-- [ ] Seafile: set up from scratch (IP 192.168.1.14, DNS record already exists in Pi-hole).
+- [x] Seafile: set up from scratch (2026-11-20). LXC 103 at 192.168.1.14, Seafile 13.0 in Docker, data, database and logs on the HDD, HTTPS at https://seafile.lan with the local CA. See [Seafile](#seafile).
+- [ ] Seafile: test the Android sync client and the desktop client with the local CA, and set up the clients' libraries.
+- [ ] Seafile: add it to the update routine in [Maintenance](#maintenance-updates) (Docker images in `/opt/seafile`, and `docker compose pull` + `up -d`).
 
 ### Logs
 
