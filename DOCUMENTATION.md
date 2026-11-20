@@ -80,11 +80,14 @@ This document describes, in a consolidated manner, all the architecture decision
 - Vaultwarden: 192.168.1.12
 - Nginx Proxy Manager: 192.168.1.13
 - Seafile: 192.168.1.14 (planned)
-- IPs defined outside the router's DHCP range to avoid conflicts
+- IPs defined outside the router's DHCP range (pool 192.168.1.64 to 192.168.1.253, 1 hour lease) to avoid conflicts
 
 ### DNS (Pi-hole)
 
 - Pi-hole configured as primary DNS on the network
+- Router DHCP settings (the router keeps doing DHCP): primary DNS `192.168.1.11`, secondary DNS `192.168.1.11` (both Pi-hole, so no device can skip the filtering), domain name `lan`. Devices pick this up when they renew their lease.
+- Trade-off: with both entries pointing to Pi-hole, if Pi-hole is down no device has DNS.
+- Only DHCP clients get this. The host and the containers have fixed settings and **don't**: by default they use the router's own resolver (`192.168.1.1`), which doesn't forward to Pi-hole, doesn't know the `.lan` names and sometimes times out. Their DNS is set by hand (containers: see the DNS tab in [Virtualization](#virtualization); host: *pve > System > DNS*).
 - Local records:
   vault.lan -> 192.168.1.13
   seafile.lan -> 192.168.1.13
@@ -488,7 +491,9 @@ Network Tab
 
 DNS Tab
 
-* Leave default (use host)
+* DNS domain: `lan`
+* DNS servers: `192.168.1.11 1.1.1.1` (Pi-hole first, Cloudflare as fallback). Don't leave "use host": containers have fixed IPs, so they don't get the DNS the router's DHCP hands out. For Pi-hole itself (100) use only `1.1.1.1`, so it never depends on itself.
+* Already created containers: `pct set <id> --nameserver "192.168.1.11 1.1.1.1" --searchdomain lan`, then `pct reboot <id>`.
 
   Click Next.
 
@@ -1415,7 +1420,7 @@ A kernel update only takes effect after a reboot (`uname -r` shows the running o
 - [x] Vaultwarden: enable two-step login (*Settings → Security → Two-step login*) with an authenticator app, and keep the recovery code on paper.
 - [x] Test whether NPM (102) works without `lxc.apparmor.profile: unconfined`, `lxc.cgroup2.devices.allow: a` and `lxc.mount.auto: proc:rw sys:rw` (2026-11-20). It does: the three lines were commented out one at a time (full `pct stop` and `pct start` after each) and Docker, NPM and the proxy hosts kept working. 102 is now confined like the other containers (`/sys` read-only).
 - [x] Migrate certificates to the local CA (see [Certificates](#certificates-internal-https)). Required before using the Bitwarden apps or Seafile sync clients.
-- [ ] Point the containers' DNS to Pi-hole (192.168.1.11) instead of the router. Today the containers use the host's resolver (`nameserver 192.168.1.1`), and the router often doesn't answer DNS queries: NPM's Docker logs "failed to query external DNS server ... i/o timeout" (273 times since 2026-10-22), so its lookups (Cloudflare IP lists, GitHub version check) sometimes fail. Possible fix: set *DNS servers* in each container's DNS options (`pct set <id> --nameserver 192.168.1.11`). Careful with Pi-hole (100) itself: it must not depend on its own DNS to start.
+- [x] Point the DNS of the containers and the host to Pi-hole (2026-11-20). 101 and 102 use `192.168.1.11` then `1.1.1.1`, Pi-hole (100) uses only `1.1.1.1`, and the host uses `192.168.1.11` then `1.1.1.1` (`pvesh set /nodes/pve/dns ...`). Before, they all used the router (`192.168.1.1`), which doesn't know `.lan` and sometimes times out (NPM logged 273 DNS timeouts since 2026-10-22).
 - [ ] Seafile: set up from scratch (IP 192.168.1.14, DNS record already exists in Pi-hole).
 
 ### Logs
