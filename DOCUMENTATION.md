@@ -28,6 +28,7 @@
 * [Vaultwarden](#vaultwarden)
 * [Seafile](#seafile)
 * [Maintenance (updates)](#maintenance-updates)
+* [Outage (Pi-hole or host down)](#outage-pi-hole-or-host-down)
 * [TODOs](#todos)
 
 
@@ -1729,6 +1730,54 @@ A kernel update only takes effect after a reboot (`uname -r` shows the running o
 ### Automating (later)
 
 `unattended-upgrades` inside the containers can install Debian security updates by itself. It's left for later, after the manual routine feels familiar and backups exist.
+
+## Outage (Pi-hole or host down)
+
+When the homelab hardware goes down, every device on the LAN loses DNS, because Pi-hole is both the primary and the secondary DNS handed out by the router (see [DNS (Pi-hole)](#dns-pi-hole)). The fix for internet access is to point the router back to public DNS for the time being. This is a trade-off: while it's in place, devices skip Pi-hole's filtering and local records.
+
+### Quick recovery: get internet back
+
+1. Log in to the router and change the DHCP DNS servers from `192.168.1.11` to `1.1.1.1`, on both primary and secondary. Save or apply.
+2. Make the devices pick it up. Their DHCP lease still has the old DNS until it renews:
+   - Phone: turn Wi-Fi off and on, or forget and rejoin the network.
+   - Windows: `ipconfig /release`, `ipconfig /renew`, `ipconfig /flushdns`.
+   - macOS: reconnect Wi-Fi, then `sudo dscacheutil -flushcache`.
+   - Linux: reconnect the network, or `resolvectl flush-caches`.
+3. Android only: check Settings > Network > Private DNS. If it's set to a hostname, set it to *Automatic* or *Off*, because it overrides the DHCP DNS.
+4. Test. `nslookup google.com` should answer. If it doesn't but `nslookup google.com 1.1.1.1` does, the device still has the old DNS: repeat step 2. If both fail, the problem is upstream (ISP, modem or router WAN).
+
+Devices that never reconnect switch over on their own when the lease renews (1 hour, see [IP Addressing](#ip-addressing)).
+
+### What stays down
+
+Until the homelab is back, these don't work, and that's expected:
+
+- Local names: `*.countess-lovelace.duckdns.org`, `vault.lan`, `seafile.lan` (they all resolve through Pi-hole's local records).
+- Ad and tracker blocking, and the Pi-hole dashboard.
+- Remote access through the names, which needs Pi-hole for resolution.
+
+The services still work by IP from the LAN if the containers are running, for example `http://192.168.1.12:8080` for Vaultwarden, or `https://192.168.1.13:81` for NPM. Vaultwarden's web vault needs HTTPS to work, so use the name once it's back.
+
+The host and the containers have fixed DNS settings, so the router change doesn't affect them. Containers list `192.168.1.11` first, so while Pi-hole is down each lookup waits for a timeout before falling back to `1.1.1.1`. Expect them to be slow, not dead.
+
+### Bring the homelab back
+
+1. Power on the host. The containers with `onboot` (100, 101, 102) start with it, but check: `pct list`. Start Pi-hole first if needed: `pct start 100`.
+2. Check the host: `systemctl --failed`. If a container is stuck: `pct start <id>`, then `pct exec <id> -- systemctl --failed`.
+3. Check Pi-hole answers, from the host or a device:
+   ```bash
+   dig +short @192.168.1.11 example.com
+   dig +short @192.168.1.11 vault.countess-lovelace.duckdns.org
+   ```
+   The first must return an address, and the second `192.168.1.13`. If the second is empty, the local records were lost: check the Pi-hole *Local DNS Records* step in [Pi-hole](#pi-hole).
+4. Check NPM and the services: `https://vault.countess-lovelace.duckdns.org` and `https://seafile.countess-lovelace.duckdns.org` open.
+5. **Put the router back**: DHCP DNS primary and secondary `192.168.1.11`, then renew the leases as in step 2 above. Until this is done, devices bypass Pi-hole and the filtering is off.
+6. Test from a device: `nslookup vault.countess-lovelace.duckdns.org` returns `192.168.1.13`, and the ads are blocked again on the Pi-hole dashboard.
+
+### Tips
+
+- Keep the router's admin page and the Pi-hole address in a note, so the change can be done from a phone if the main computer is down.
+- If the outage will be long, keep the router on `1.1.1.1`. Just remember step 5, or the filtering stays off without anyone noticing.
 
 ## TODOs
 
