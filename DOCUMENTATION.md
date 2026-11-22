@@ -581,7 +581,8 @@ For every service that is reached through NPM (all of them), once the service is
     - IPv6: None
 
     DNS:
-    - Default
+    - DNS domain: lan
+    - DNS servers: 1.1.1.1 only (Pi-hole is the network DNS, so it must not depend on itself)
 
     Or simply run:
     ```bash
@@ -591,11 +592,17 @@ For every service that is reached through NPM (all of them), once the service is
     --memory 512 \
     --swap 512 \
     --net0 name=eth0,bridge=vmbr0,ip=192.168.1.11/24,gw=192.168.1.1,firewall=1,type=veth \
+    --nameserver 1.1.1.1 \
+    --searchdomain lan \
     --rootfs local-lvm:8 \
     --unprivileged 1 \
     --features nesting=1 \
+    --onboot 1 \
     --password
     ```
+
+    - `--nameserver 1.1.1.1` → Pi-hole doesn't use itself as DNS.
+    - `--onboot 1` → starts on boot (step 2 below does the same, for a container created in the GUI).
 
 2. Start on boot
 
@@ -752,9 +759,30 @@ In the Pi-hole dashboard, queries from your devices should start appearing.
     - IPv6: None
 
     DNS:
-    - Default
+    - DNS domain: lan
+    - DNS servers: 192.168.1.11 1.1.1.1 (Pi-hole first, Cloudflare as fallback)
 
-2. Ensure container configuration is
+    Or simply run:
+    ```bash
+    pct create 102 local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst \
+    --hostname npm \
+    --cores 1 \
+    --memory 1024 \
+    --swap 512 \
+    --net0 name=eth0,bridge=vmbr0,ip=192.168.1.13/24,gw=192.168.1.1,firewall=1,type=veth \
+    --nameserver "192.168.1.11 1.1.1.1" \
+    --searchdomain lan \
+    --rootfs local-lvm:8 \
+    --unprivileged 1 \
+    --features keyctl=1,nesting=1 \
+    --onboot 1 \
+    --password
+    ```
+
+    - `keyctl=1,nesting=1` → required for Docker inside an unprivileged LXC.
+    - `--onboot 1` → starts on boot (the step "Start on boot" below does the same, for a container created in the GUI).
+
+2. Ensure container configuration is (only needed if the container was created in the GUI)
 
     ```bash
     nano /etc/pve/lxc/102.conf
@@ -1154,7 +1182,8 @@ A service certificate lasts 825 days (the CA, 10 years). Before it expires, repe
     - IPv6: None
 
     DNS:
-    - Default
+    - DNS domain: lan
+    - DNS servers: 192.168.1.11 1.1.1.1 (Pi-hole first, Cloudflare as fallback)
 
     Or simply run:
     ```bash
@@ -1164,11 +1193,16 @@ A service certificate lasts 825 days (the CA, 10 years). Before it expires, repe
     --memory 512 \
     --swap 512 \
     --net0 name=eth0,bridge=vmbr0,ip=192.168.1.12/24,gw=192.168.1.1,firewall=1,type=veth \
+    --nameserver "192.168.1.11 1.1.1.1" \
+    --searchdomain lan \
     --rootfs local-lvm:8 \
     --unprivileged 1 \
     --features keyctl=1,nesting=1 \
+    --onboot 1 \
     --password
     ```
+
+    - `--onboot 1` → starts on boot (the step "Start on boot" below does the same, for a container created in the GUI).
 
 2. Enable keyctl (if the container was created in the GUI)
 
