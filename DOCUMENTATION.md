@@ -24,7 +24,7 @@
 * |__[Virtualization (standard LXC procedure)](#virtualization)
 * [Pi-hole](#pi-hole)
 * [NPM - Nginx Proxy Manager](#npm---nginx-proxy-manager)
-* [Certificates (internal HTTPS)](#certificates-internal-https)
+* [Certificates (HTTPS)](#certificates-https)
 * [Vaultwarden](#vaultwarden)
 * [Seafile](#seafile)
 * [Maintenance (updates)](#maintenance-updates)
@@ -87,19 +87,20 @@ This document describes, in a consolidated manner, all the architecture decision
 - Pi-hole configured as primary DNS on the network
 - Router DHCP settings (the router keeps doing DHCP): primary DNS `192.168.1.11`, secondary DNS `192.168.1.11` (both Pi-hole, so no device can skip the filtering), domain name `lan`. Devices pick this up when they renew their lease.
 - Trade-off: with both entries pointing to Pi-hole, if Pi-hole is down no device has DNS.
-- Only DHCP clients get this. The host and the containers have fixed settings and **don't**: by default they use the router's own resolver (`192.168.1.1`), which doesn't forward to Pi-hole, doesn't know the `.lan` names and sometimes times out. Their DNS is set by hand (containers: see the DNS tab in [Virtualization](#virtualization); host: *pve > System > DNS*).
+- Only DHCP clients get this. The host and the containers have fixed settings and **don't**: by default they use the router's own resolver (`192.168.1.1`), which doesn't forward to Pi-hole, doesn't know Pi-hole's local records and sometimes times out. Their DNS is set by hand (containers: see the DNS tab in [Virtualization](#virtualization); host: *pve > System > DNS*).
 - Local records:
-  vault.lan -> 192.168.1.13
-  seafile.lan -> 192.168.1.13
+  vault.countess-lovelace.duckdns.org -> 192.168.1.13
+  seafile.countess-lovelace.duckdns.org -> 192.168.1.13
 - Reason: all access goes through the reverse proxy
+- The old `vault.lan` and `seafile.lan` records were removed on 2026-11-22, when the services moved to the public certificate (see [Certificates](#certificates-https)).
 
 ### Reverse Proxy (Nginx Proxy Manager)
 
 - Running in a dedicated LXC
 - Ports: 80/443 (proxy), 81 (admin panel)
 - Responsible for all internal HTTPS
-- Internal certificates signed by a local CA (OpenSSL), see [Certificates](#certificates-internal-https)
-- Let's Encrypt NOT used for .lan domains
+- Let's Encrypt wildcard certificate (DNS challenge with DuckDNS) for all services, see [Certificates](#certificates-https)
+- The local CA (OpenSSL) used before is kept as an option for internal-only services
 
 ### External Access
 
@@ -113,7 +114,7 @@ This document describes, in a consolidated manner, all the architecture decision
 | **Cloudflare Tunnel** | Yes (~$10/year) | Services are public with no open router ports, and it works behind CGNAT. Traffic passes through Cloudflare |
 
 - **Preferred direction: VPN.** Not decided or set up yet. A VPN covers reaching Vaultwarden and Seafile from outside with only the owner's devices. A public option (tunnel or port forwarding) is only needed to share Seafile links with other people or to reach services without a VPN app.
-- Public CA certificates are independent of this choice, see [Alternative for the future](#alternative-for-the-future).
+- Public CA certificates are independent of this choice, see [DuckDNS or your own domain](#duckdns-or-your-own-domain).
 
 ### Target State (goal)
 
@@ -541,7 +542,7 @@ pct set $ID -$MP /srv/data/containers/$NAME/logs,mp=/var/log
 
 5) HTTPS certificate
 
-For every service that is reached through NPM with a `.lan` name (all of them), once the service is installed and answers on its own IP and port: create its certificate with the local CA and use it in its NPM proxy host, following [Certificates](#certificates-internal-https) (steps 2 to 5, then test with step 7). Devices that already have the CA installed need nothing.
+For every service that is reached through NPM (all of them), once the service is installed and answers on its own IP and port: add the Pi-hole local record `<service>.countess-lovelace.duckdns.org` and an NPM proxy host that uses the wildcard certificate, following [Certificates](#certificates-https) (*For every service*). No new certificate is needed.
 
 ## Pi-hole
 
@@ -683,21 +684,21 @@ Web interface: `http://192.168.1.11/admin` (also `https://192.168.1.11/admin` wi
 
     | Domain | IP | Reason |
     | :---- | :---- | :---- |
-    | vault.lan | 192.168.1.13 | Vaultwarden, through NPM |
-    | seafile.lan | 192.168.1.13 | Seafile, through NPM |
+    | vault.countess-lovelace.duckdns.org | 192.168.1.13 | Vaultwarden, through NPM |
+    | seafile.countess-lovelace.duckdns.org | 192.168.1.13 | Seafile, through NPM |
 
     All records point to NPM, never directly to the service.
 
     Or from the container shell:
 
     ```bash
-    pihole-FTL --config dns.hosts '["192.168.1.13 vault.lan","192.168.1.13 seafile.lan"]'
+    pihole-FTL --config dns.hosts '["192.168.1.13 vault.countess-lovelace.duckdns.org","192.168.1.13 seafile.countess-lovelace.duckdns.org"]'
     ```
 
 4. Router: make devices use Pi-hole
 
     In the router's DHCP/LAN settings, set the DNS server handed out to devices to `192.168.1.11`.
-    Without this step, devices keep using the router as DNS and nothing is filtered, and `*.lan` names don't resolve.
+    Without this step, devices keep using the router as DNS and nothing is filtered, and the local records don't resolve.
     Devices pick up the new DNS when they renew their DHCP lease (reconnect to the network).
 
 ### Verify
@@ -705,7 +706,7 @@ Web interface: `http://192.168.1.11/admin` (also `https://192.168.1.11/admin` wi
 From the Proxmox host or any device on the network:
 
 ```bash
-dig +short @192.168.1.11 vault.lan
+dig +short @192.168.1.11 vault.countess-lovelace.duckdns.org
 ```
 
 Should return `192.168.1.13`.
@@ -781,7 +782,7 @@ In the Pi-hole dashboard, queries from your devices should start appearing.
     ```
 
     - /srv/data/containers/npm/data → /data/npm inside the container: NPM config, database, proxy hosts and uploaded certificates
-    - /srv/data/containers/npm/letsencrypt → /data/letsencrypt inside the container: Let's Encrypt certificates (not used for .lan)
+    - /srv/data/containers/npm/letsencrypt → /data/letsencrypt inside the container: Let's Encrypt certificates (the wildcard certificate)
     - Docker itself (/data/docker: images, layers, cache) stays on the container disk (SSD). It can always be downloaded again.
 
 5. Move logs to the HDD (before the first start)
@@ -790,7 +791,7 @@ In the Pi-hole dashboard, queries from your devices should start appearing.
 
 6. Start on boot
 
-    NPM is the single entry point for every service (`*.lan` → 192.168.1.13): if it's down, no service is reachable by name.
+    NPM is the single entry point for every service (`*.countess-lovelace.duckdns.org` → 192.168.1.13): if it's down, no service is reachable by name.
 
     ```bash
     pct set 102 --onboot 1
@@ -910,13 +911,80 @@ docker ps
 
 Should show the `nginx-proxy-manager` container as `Up`.
 
-## Certificates (internal HTTPS)
+## Certificates (HTTPS)
 
-`.lan` is not a public domain, so Let's Encrypt can't issue certificates for it. Internal HTTPS uses a small local Certificate Authority (CA) we create ourselves with OpenSSL: one CA, one certificate per service, uploaded to NPM as *Custom* certificates.
+Two ways to get HTTPS for the services behind NPM. The **public certificate with DuckDNS** is the one in use (since 2026-11-22). The **local CA** was used before, and is kept as an option for services that are only accessed internally.
 
-**For every new service**, follow steps 2 to 5 below (create the certificate, copy it, upload it to NPM, use it in the proxy host) and test it with step 7. Devices that already have the CA installed (step 6) need nothing.
+### Public certificate with DuckDNS (in use)
 
-### Why not self-signed certificates
+One Let's Encrypt **wildcard** certificate (`*.countess-lovelace.duckdns.org`) that NPM gets with the *DNS challenge*. It replaced the local CA for Vaultwarden and Seafile because the Android apps (Bitwarden, Seafile) rejected the local CA. Devices need nothing installed.
+
+| Service | Name |
+| :---- | :---- |
+| Vaultwarden | `vault.countess-lovelace.duckdns.org` |
+| Seafile | `seafile.countess-lovelace.duckdns.org` |
+
+Nothing is exposed to the internet: DuckDNS only holds the temporary record used to validate the challenge. The names resolve to NPM (`192.168.1.13`) through Pi-hole's local records, see [Pi-hole](#pi-hole).
+
+#### Set up (once)
+
+1. DuckDNS: sign in at duckdns.org, create a subdomain (`countess-lovelace`) and copy the token.
+    - The subdomain name becomes public in the Certificate Transparency logs, so don't use anything that identifies you.
+    - The token is a secret (it can change your DuckDNS records). Enter it only in NPM: never in this guide, in the repository or in a chat.
+2. NPM: *SSL Certificates* > *Add SSL Certificate* > *Let's Encrypt via DNS*
+    - Domain names: `*.countess-lovelace.duckdns.org` **and** `countess-lovelace.duckdns.org`
+    - DNS provider: DuckDNS, with the token as credentials
+    - A certificate only for `countess-lovelace.duckdns.org` does **not** cover `vault.countess-lovelace.duckdns.org` (the first attempt was like that and had to be redone). The wildcard name is what covers the services.
+3. Check what was issued (on the host; the folder name `npm-<n>` changes with each certificate):
+
+    ```bash
+    openssl x509 -in /srv/data/containers/npm/letsencrypt/live/npm-<n>/fullchain.pem -noout -issuer -enddate -ext subjectAltName
+    ```
+
+    It must list `DNS:*.countess-lovelace.duckdns.org` and `DNS:countess-lovelace.duckdns.org`, with *Let's Encrypt* as the issuer.
+
+#### For every service (new ones too)
+
+No new certificate is needed, the wildcard covers any `<service>.countess-lovelace.duckdns.org`.
+
+1. Pi-hole local record `<service>.countess-lovelace.duckdns.org` → `192.168.1.13` (NPM, never the service itself).
+2. NPM proxy host for that name, with the wildcard certificate, *Force SSL* and *HTTP/2 Support*.
+3. Set the service's own public URL: `DOMAIN` in Vaultwarden, `SEAFILE_SERVER_HOSTNAME` in Seafile (recreate the container afterwards).
+4. Test: open it in the browser, run `curl https://<service>.countess-lovelace.duckdns.org` **without** `--cacert` (it must verify), and test the Android apps.
+
+#### Renewal
+
+Let's Encrypt certificates last 90 days. NPM renews them by itself. Check the expiry date in NPM's *SSL Certificates* list from time to time. If the DuckDNS token ever changes, update it in NPM.
+
+#### Limits to know
+
+- The names only resolve to NPM through Pi-hole. If Pi-hole is down, no name resolves. Away from home they don't resolve to the private address, so reaching them from outside needs a VPN that uses Pi-hole as DNS, see [External Access](#external-access).
+- If DuckDNS is down when a renewal is due, the renewal fails, but the current certificate keeps working until it expires.
+- For a service that must not appear in public records, or that doesn't need a public certificate, use the local CA below.
+
+#### DuckDNS or your own domain
+
+With a real domain (e.g. `vault.mydomain.com`) the procedure is the same, using the DNS provider's token (Cloudflare) instead of DuckDNS's. DuckDNS was chosen on 2026-11-22 because it's free.
+
+**What is free and what is not:** the certificate (Let's Encrypt) and a Cloudflare account are free, but **the domain is not**: it costs about $10 a year (Cloudflare Registrar sells them at cost; one bought elsewhere can use Cloudflare's DNS by pointing its nameservers there). The free way is DuckDNS.
+
+| Option | Cost | Names | Notes |
+| :---- | :---- | :---- | :---- |
+| Own domain + Cloudflare | ~$10/year (domain) | `vault.mydomain.com` | Cleaner names and full control. Only required for the certificates if you want your own domain, and required if Cloudflare Tunnel is chosen for external access. API token limited to *Zone → DNS → Edit* |
+| DuckDNS | Free | `vault.yourname.duckdns.org` | NPM supports its DNS challenge. Enough for the certificates and for a VPN or port forwarding setup. Depends on a free third-party service, and can't be used with Cloudflare Tunnel |
+
+- Let's Encrypt publishes every certificate in the public Certificate Transparency logs, so the hostnames become visible. A wildcard certificate (`*.mydomain.com`) avoids listing each service.
+- Switching later from DuckDNS to an own domain means repeating the steps above for the new names.
+
+### Local CA (optional, not in use)
+
+> Used from 2026-11-17 to 2026-11-22 for `vault.lan` and `seafile.lan`. Retired when Vaultwarden and Seafile moved to the public certificate. The CA files stay in `/root/ca` (and in `/srv/data/backups/ca`) in case it's needed again: to access a service only internally, or to go back. Using it again also needs a Pi-hole local record and an NPM proxy host for the `.lan` name, as in the public certificate steps above. The examples below use `vault.lan` from the earlier setup.
+>
+> Limit: Android apps ignore CAs installed by the user, so apps like Bitwarden and Seafile on Android don't work with it. Browsers do.
+
+`.lan` is not a public domain, so Let's Encrypt can't issue certificates for it. The local CA is a small Certificate Authority we create ourselves with OpenSSL: one CA, one certificate per service, uploaded to NPM as *Custom* certificates. For every service, follow steps 2 to 5 below (create the certificate, copy it, upload it to NPM, use it in the proxy host) and test it with step 7. Devices that already have the CA installed (step 6) need nothing.
+
+#### Why not self-signed certificates
 
 The first attempt was one self-signed certificate per service. It was replaced by the local CA because:
 
@@ -924,7 +992,7 @@ The first attempt was one self-signed certificate per service. It was replaced b
 - Every device had to trust every certificate one by one.
 - Apps (Bitwarden, Seafile sync clients) refuse self-signed certificates.
 
-### Local Certificate Authority (CA) (in use)
+#### The local CA
 
 Create your own small CA once, install it on each device once, and sign one certificate per service with it. Every device then trusts every service, now and in the future.
 
@@ -1030,25 +1098,11 @@ The CA lives in `/root/ca` on the host: only root can read it, and no container 
     - From the command line: `curl --cacert cerebro-ca.crt https://vault.lan` must connect without errors.
     - Apps (Bitwarden, Seafile client): Android apps often ignore CAs installed by the user, so test them separately from the browser.
 
-    > **Observation (2026-11-20): the Bitwarden Android app doesn't trust this CA.** With `cerebro-ca.crt` installed on the phone, https://vault.lan opens without warnings in the phone's browser, but the Bitwarden app, with *Self-hosted* server URL `https://vault.lan`, fails to log in saying it couldn't verify the server certificate. Likely cause: since Android 7, apps ignore CAs installed by the user unless they opt in, while browsers accept them. The app's *Import certificate* option is not a fix, because it is for client certificates. For now the phone uses the web vault in the browser. Real fix: a certificate from a public CA (Let's Encrypt with the DNS challenge, see [Alternative for the future](#alternative-for-the-future)). The Seafile Android client will probably behave the same way.
+    > **Observation (2026-11-20): the Bitwarden Android app doesn't trust this CA.** With `cerebro-ca.crt` installed on the phone, https://vault.lan opens without warnings in the phone's browser, but the Bitwarden app, with *Self-hosted* server URL `https://vault.lan`, fails to log in saying it couldn't verify the server certificate. Likely cause: since Android 7, apps ignore CAs installed by the user unless they opt in, while browsers accept them. The app's *Import certificate* option is not a fix, because it is for client certificates. For now the phone uses the web vault in the browser. Real fix: a certificate from a public CA. Done on 2026-11-22, see [Public certificate with DuckDNS](#public-certificate-with-duckdns-in-use): the Bitwarden and Seafile Android apps work with it.
 
 #### Renewing a certificate
 
 A service certificate lasts 825 days (the CA, 10 years). Before it expires, repeat step 2 for the same `NAME` (it overwrites the old files), upload the new one in NPM (step 4), switch the proxy host to it (step 5) and delete the old one. Devices need nothing, since they trust the CA, not the certificate. Check the expiry date with `openssl x509 -in <name>.crt -noout -enddate`.
-
-### Alternative for the future
-
-With a real domain (e.g. `vault.mydomain.com`), NPM can get Let's Encrypt certificates using the *DNS challenge*, even for services that are only reachable inside the LAN. Then no device needs a CA installed (this fixes the Android apps that reject the local CA). Nothing is exposed to the internet: the DNS record only exists so the challenge can be validated. This is independent of how (or whether) external access is set up, see [External Access](#external-access).
-
-**What is free and what is not:** the certificate (Let's Encrypt) and a Cloudflare account are free, but **the domain is not**: it costs about $10 a year (Cloudflare Registrar sells them at cost; one bought elsewhere can use Cloudflare's DNS by pointing its nameservers there). The free way is DuckDNS.
-
-| Option | Cost | Names | Notes |
-| :---- | :---- | :---- | :---- |
-| Own domain + Cloudflare | ~$10/year (domain) | `vault.mydomain.com` | Cleaner names and full control. Only required for the certificates if you want your own domain, and required if Cloudflare Tunnel is chosen for external access. API token limited to *Zone → DNS → Edit* |
-| DuckDNS | Free | `vault.yourname.duckdns.org` | NPM supports its DNS challenge. Enough for the certificates and for a VPN or port forwarding setup. Depends on a free third-party service, and can't be used with Cloudflare Tunnel |
-
-- Let's Encrypt publishes every certificate in the public Certificate Transparency logs, so the hostnames become visible. A wildcard certificate (`*.mydomain.com`) avoids listing each service.
-- Pi-hole's local records must point the new names to NPM (`192.168.1.13`), like the `.lan` ones.
 
 ## Vaultwarden
 
@@ -1219,7 +1273,7 @@ With a real domain (e.g. `vault.mydomain.com`), NPM can get Let's Encrypt certif
         ports:
           - "8080:80"
         environment:
-          DOMAIN: "https://vault.lan"
+          DOMAIN: "https://vault.countess-lovelace.duckdns.org"
           SIGNUPS_ALLOWED: "true"
           LOG_FILE: "/var/log/vaultwarden/vaultwarden.log"
         volumes:
@@ -1265,7 +1319,7 @@ With a real domain (e.g. `vault.mydomain.com`), NPM can get Let's Encrypt certif
 
 8. Create your accounts, then close sign-ups
 
-    Configure NPM and Pi-hole first (sections below), then open https://vault.lan, click *Create account* and create your user account(s).
+    Configure NPM and Pi-hole first (sections below), then open https://vault.countess-lovelace.duckdns.org, click *Create account* and create your user account(s).
 
     Master password:
     - Use a passphrase you can remember (4-6 random words; the Bitwarden generator has a *Passphrase* type) and write it on paper kept safe at home.
@@ -1285,14 +1339,9 @@ With a real domain (e.g. `vault.mydomain.com`), NPM can get Let's Encrypt certif
 
 ### Configure Vaultwarden on NPM
 
-#### Create SSL certificate
+#### SSL certificate
 
-Create the certificate for `vault.lan` and import it into NPM following steps 2 to 4 of [Certificates](#certificates-internal-https) (with `NAME=vault.lan`). In NPM's *Add SSL Certificate* > *Custom*:
-
-- Certificate name: `vault.lan (local CA)`
-- Certificate Key → upload `vault.lan.key`
-- Certificate → upload `vault.lan.crt`
-- Intermediate Certificate → upload `cerebro-ca.crt`
+No certificate is created for Vaultwarden: the proxy host uses the wildcard certificate (`*.countess-lovelace.duckdns.org`), see [Certificates](#certificates-https).
 
 #### Configure proxy host
 
@@ -1300,7 +1349,7 @@ In the NPM dashboard go to `Proxy Hosts → Add Proxy Host`.
 
 "Details" Tab
 
-- Domain Names: vault.lan
+- Domain Names: vault.countess-lovelace.duckdns.org
 - Scheme: http
 - Forward Hostname / IP: 192.168.1.12
 - Forward Port: 8080
@@ -1309,14 +1358,14 @@ In the NPM dashboard go to `Proxy Hosts → Add Proxy Host`.
 - Websockets Support: true
 
 "SSL" Tab
-- SSL Certificate: vault-internal
+- SSL Certificate: the wildcard certificate (`*.countess-lovelace.duckdns.org`)
 - Force SSL: true
 - HTTP/2 Support: true
 
 ### Configure DNS record in Pi-hole
 
 Access the Pi-hole interface and go to *Settings* > *Local DNS Records*. Add:
-- Domain: vault.lan
+- Domain: vault.countess-lovelace.duckdns.org
 - IP Address: 192.168.1.13 (NPM, not Vaultwarden)
 
 ### Verify
@@ -1337,16 +1386,16 @@ tail /var/log/vaultwarden/vaultwarden.log
 Should end with `Rocket has launched from http://0.0.0.0:80`.
 
 In the browser, test:
-> https://vault.lan
+> https://vault.countess-lovelace.duckdns.org
 
 * Vaultwarden web interface should open
 
 Notes:
-* `http://192.168.1.12:8080` still answers, but the web vault doesn't work there: browsers only allow the encryption functions (WebCrypto) it needs over HTTPS. Always use https://vault.lan.
+* `http://192.168.1.12:8080` still answers, but the web vault doesn't work there: browsers only allow the encryption functions (WebCrypto) it needs over HTTPS. Always use https://vault.countess-lovelace.duckdns.org.
 
 ## Seafile
 
-HTTPS: create the certificate for `seafile.lan` and use it in its proxy host following [Certificates](#certificates-internal-https) (steps 2 to 5), and follow [Logs on the HDD](#virtualization) from the start.
+HTTPS: use the wildcard certificate in its proxy host (`seafile.countess-lovelace.duckdns.org`) following [Certificates](#certificates-https) (*For every service*), and follow [Logs on the HDD](#virtualization) from the start.
 
 ### Prepare LXC
 
@@ -1467,7 +1516,7 @@ Same first steps as [Vaultwarden](#install-service) (enter the container, update
     | Variable | Value | Why |
     | :---- | :---- | :---- |
     | `COMPOSE_FILE` | `'seafile-server.yml'` | Only the server file. Without `caddy.yml` and `seadoc.yml` |
-    | `SEAFILE_SERVER_HOSTNAME` | `seafile.lan` | Seafile builds its public URLs from it |
+    | `SEAFILE_SERVER_HOSTNAME` | `seafile.countess-lovelace.duckdns.org` | Seafile builds its public URLs from it (it was `seafile.lan` until 2026-11-22) |
     | `SEAFILE_SERVER_PROTOCOL` | `https` | TLS ends at NPM, but the links Seafile gives out must be https |
     | `TIME_ZONE` | `Europe/Lisbon` | |
     | `ENABLE_SEADOC` | `false` | SeaDoc not used for now |
@@ -1515,24 +1564,19 @@ Same first steps as [Vaultwarden](#install-service) (enter the container, update
 
 ### Configure Seafile on NPM
 
-#### Create SSL certificate
+#### SSL certificate
 
-Create the certificate for `seafile.lan` and import it into NPM following steps 2 to 4 of [Certificates](#certificates-internal-https) (with `NAME=seafile.lan`). In NPM's *Add SSL Certificate* > *Custom*:
-
-- Certificate name: `seafile.lan (local CA)`
-- Certificate Key → upload `seafile.lan.key` (delete it from your computer afterwards)
-- Certificate → upload `seafile.lan.crt`
-- Intermediate Certificate → upload `cerebro-ca.crt`
+No certificate is created for Seafile: the proxy host uses the wildcard certificate (`*.countess-lovelace.duckdns.org`), see [Certificates](#certificates-https).
 
 #### Configure proxy host
 
-If an older proxy host or certificate for `seafile.lan` exists, delete them first (the proxy host first, then the certificate).
+If an older proxy host for the same name exists, delete it first.
 
 *Proxy Hosts* > *Add Proxy Host*:
 
 "Details" Tab
 
-- Domain Names: seafile.lan
+- Domain Names: seafile.countess-lovelace.duckdns.org
 - Scheme: http
 - Forward Hostname / IP: 192.168.1.14
 - Forward Port: 80
@@ -1542,7 +1586,7 @@ If an older proxy host or certificate for `seafile.lan` exists, delete them firs
 
 "SSL" Tab
 
-- SSL Certificate: `seafile.lan (local CA)`
+- SSL Certificate: the wildcard certificate (`*.countess-lovelace.duckdns.org`)
 - Force SSL: true
 - HTTP/2 Support: true
 
@@ -1551,18 +1595,18 @@ Notes:
 
 ### Configure DNS record in Pi-hole
 
-`seafile.lan` → `192.168.1.13` (NPM, not the container) already exists, see [DNS (Pi-hole)](#dns-pi-hole).
+`seafile.countess-lovelace.duckdns.org` → `192.168.1.13` (NPM, not the container), see [DNS (Pi-hole)](#dns-pi-hole).
 
 ### Verify
 
-* From the host: `curl --cacert /root/ca/cerebro-ca.crt https://seafile.lan/api2/ping/` answers `"pong"`, and `.../seafhttp/protocol-version` answers `{"version": 2}` (the file server path, used by uploads and downloads).
-* From a device with the CA installed: https://seafile.lan opens without warnings and the admin account can log in.
-* Create a library, upload and download a file, and create a download link. The link must start with `https://seafile.lan/seafhttp/`.
-* Inside the container: name resolution uses Pi-hole (`getent hosts vault.lan` → `192.168.1.13`), see the DNS tab in [Virtualization](#virtualization).
+* From the host: `curl https://seafile.countess-lovelace.duckdns.org/api2/ping/` (no `--cacert` needed) answers `"pong"`, and `.../seafhttp/protocol-version` answers `{"version": 2}` (the file server path, used by uploads and downloads).
+* From any device: https://seafile.countess-lovelace.duckdns.org opens without warnings and the admin account can log in.
+* Create a library, upload and download a file, and create a download link. The link must start with `https://seafile.countess-lovelace.duckdns.org/seafhttp/`.
+* Inside the container: name resolution uses Pi-hole (`getent hosts vault.countess-lovelace.duckdns.org` → `192.168.1.13`), see the DNS tab in [Virtualization](#virtualization).
 
 Notes:
-* **`seafile.lan` resolves to the container itself inside the container.** Proxmox adds `192.168.1.14 seafile.lan seafile` to the container's `/etc/hosts` (hostname + search domain `lan`), so there `seafile.lan` is `192.168.1.14`, not NPM. This turned out not to matter: in Seafile 13 `SERVICE_URL` and `FILE_SERVER_ROOT` are built from `SEAFILE_SERVER_PROTOCOL` and `SEAFILE_SERVER_HOSTNAME` (`seahub/settings.py`, not in the web settings page or `seahub_settings.py`) and are only given to clients. Seafile's own internal calls use `http://127.0.0.1`. If a component ever fails connecting to `https://seafile.lan` from inside the stack, add `extra_hosts` to that service in `seafile-server.yml`. Note that pointing it to NPM (`192.168.1.13`) would need the local CA to be trusted inside that Docker container.
-* **Seafile Android client:** it will probably reject the local CA, like the Bitwarden app (see [Certificates](#certificates-internal-https), step 7). Not tested. The web interface and the desktop clients work with the CA installed.
+* **Name resolution inside the container:** `seafile.countess-lovelace.duckdns.org` resolves through Pi-hole to NPM (`192.168.1.13`), and NPM's certificate is public, so no CA is needed inside Docker. In Seafile 13 `SERVICE_URL` and `FILE_SERVER_ROOT` are built from `SEAFILE_SERVER_PROTOCOL` and `SEAFILE_SERVER_HOSTNAME` (`seahub/settings.py`, not in the web settings page or `seahub_settings.py`) and are only given to clients. Seafile's own internal calls use `http://127.0.0.1`. (With the old `.lan` name, Proxmox's `/etc/hosts` entry made `seafile.lan` resolve to the container itself, which didn't matter.)
+* **Android client:** tested on 2026-11-22 with the public certificate and it works (it rejected the local CA).
 * **Backups:** nothing is scheduled. Back up `/srv/data/containers/seafile/{data,mysql}` (vzdump doesn't include them) together with a vzdump of 103. The database (`mysql`) holds the libraries' metadata, so the two folders must be copied together, taken while Seafile is stopped (`docker compose stop` in `/opt/seafile`) for a consistent copy.
 * **Logs:** the system logs are in `/srv/data/containers/seafile/logs` (the container's `/var/log`), Seafile's own logs in `/srv/data/containers/seafile/data/seafile/logs`, and Docker's logs are capped at 3 × 10MB.
 
@@ -1603,7 +1647,7 @@ vzdump <id> --storage data-hdd --mode snapshot --compress zstd
 | Debian packages in an LXC | `pct exec <id> -- bash -c 'apt update && apt full-upgrade -y'` | Restart the container if libc, systemd or openssl changed: `pct reboot <id>` |
 | Pi-hole (core, web, FTL) | `pct exec 100 -- pihole -up` | Test DNS (below) |
 | Vaultwarden / NPM (Docker) | `pct exec <id> -- bash -c 'cd /data && docker compose pull && docker compose up -d'` | Open the web interface |
-| Seafile (Docker) | `pct exec 103 -- bash -c 'cd /opt/seafile && docker compose pull && docker compose up -d'` | Check `docker ps` and open https://seafile.lan |
+| Seafile (Docker) | `pct exec 103 -- bash -c 'cd /opt/seafile && docker compose pull && docker compose up -d'` | Check `docker ps` and open https://seafile.countess-lovelace.duckdns.org |
 
 Notes:
 
@@ -1620,9 +1664,9 @@ pct exec 100 -- pihole status
 dig +short @192.168.1.11 example.com
 ```
 
-- https://vault.lan opens and you can log in
+- https://vault.countess-lovelace.duckdns.org opens and you can log in
 - NPM's admin page opens (http://192.168.1.13:81) and the proxy hosts still work
-- https://seafile.lan opens and you can log in; `pct exec 103 -- docker ps` shows `seafile` and `seafile-mysql` as `healthy`
+- https://seafile.countess-lovelace.duckdns.org opens and you can log in; `pct exec 103 -- docker ps` shows `seafile` and `seafile-mysql` as `healthy`
 
 ### Host reboot
 
@@ -1659,20 +1703,21 @@ A kernel update only takes effect after a reboot (`uname -r` shows the running o
 - [x] Delete the old Vaultwarden test data, `/srv/data/containers/vaultwarden.old` (2026-11-17).
 - [x] Vaultwarden: enable two-step login (*Settings → Security → Two-step login*) with an authenticator app, and keep the recovery code on paper.
 - [x] Test whether NPM (102) works without `lxc.apparmor.profile: unconfined`, `lxc.cgroup2.devices.allow: a` and `lxc.mount.auto: proc:rw sys:rw` (2026-11-20). It does: the three lines were commented out one at a time (full `pct stop` and `pct start` after each) and Docker, NPM and the proxy hosts kept working. 102 is now confined like the other containers (`/sys` read-only).
-- [x] Migrate certificates to the local CA (see [Certificates](#certificates-internal-https)). Required before using the Bitwarden apps or Seafile sync clients.
+- [x] Migrate certificates to the local CA (2026-11-17). Replaced on 2026-11-22 by the public certificate, see [Certificates](#certificates-https).
 - [x] Point the DNS of the containers and the host to Pi-hole (2026-11-20). 101 and 102 use `192.168.1.11` then `1.1.1.1`, Pi-hole (100) uses only `1.1.1.1`, and the host uses `192.168.1.11` then `1.1.1.1` (`pvesh set /nodes/pve/dns ...`). Before, they all used the router (`192.168.1.1`), which doesn't know `.lan` and sometimes times out (NPM logged 273 DNS timeouts since 2026-10-22).
-- [x] Seafile: set up from scratch (2026-11-20). LXC 103 at 192.168.1.14, Seafile 13.0 in Docker, data, database and logs on the HDD, HTTPS at https://seafile.lan with the local CA. See [Seafile](#seafile).
-- [x] ~~Seafile: test the Android sync client and the desktop client with the local CA, and set up the clients' libraries.~~ Dropped (2026-11-22): the Android client will most likely reject the local CA, like the Bitwarden app (see [Certificates](#certificates-internal-https), step 7), so testing it is pointless until the services use a certificate from a public CA. Revisit it together with that change (see [Alternative for the future](#alternative-for-the-future)). The web interface and the desktop clients work with the local CA.
+- [x] Seafile: set up from scratch (2026-11-20). LXC 103 at 192.168.1.14, Seafile 13.0 in Docker, data, database and logs on the HDD, HTTPS at https://seafile.lan with the local CA. See [Seafile](#seafile). Moved to https://seafile.countess-lovelace.duckdns.org on 2026-11-22.
+- [x] Test the Bitwarden and Seafile Android clients (2026-11-22): both work with the public certificate. They rejected the local CA, so the earlier TODO to test them with it was dropped.
+- [ ] Seafile: test the desktop client with the public certificate and set up the clients' libraries.
 - [x] Seafile: add it to the update routine in [Maintenance](#maintenance-updates) (2026-11-22): check, back up (`data` + `mysql` with the stack stopped), `docker compose pull` + `up -d` in `/opt/seafile`, and test.
 
 - [ ] Set up Immich (photos): a new LXC (104, next free IP after Seafile's 192.168.1.14 outside the DHCP pool), data and logs on the HDD (`/srv/data/containers/immich/{data,logs}`), behind NPM with HTTPS, following the [new service checklist](#virtualization) (Certificates and Logs sections). Check the RAM first (15.5 GB host, VMs 200 and 201 need ~19 GB), and if it needs machine learning or GPU access, plan the CPU/RAM for it. Add it to the update routine in [Maintenance](#maintenance-updates) and to the backups.
 
 ### External access and certificates
 
-- [ ] **Step 1, public CA certificates (do this first):** the certificate is free, but the domain is not. Choose between a domain (~$10/year, managed in Cloudflare, with an API token limited to DNS edit on that zone) or a free DuckDNS subdomain, see the comparison in [Alternative for the future](#alternative-for-the-future). In NPM, request Let's Encrypt certificates with the DNS challenge (a wildcard certificate avoids listing each hostname publicly). Works for LAN-only services, nothing is exposed to the internet. Then:
-  - Change the Pi-hole local records and the NPM proxy hosts from `.lan` to the real domain names.
-  - Remove the local CA from the devices (keep `/root/ca` until everything has moved).
-  - This unblocks the Bitwarden and Seafile Android clients, which reject the local CA. Test both, and the Seafile desktop and Android clients, and set up the libraries (this replaces the dropped Seafile client TODO).
+- [ ] **Step 1, public certificates with DuckDNS** (done on 2026-11-22 for Vaultwarden and Seafile, see [Certificates](#certificates-https)): wildcard certificate `*.countess-lovelace.duckdns.org` in NPM, Pi-hole local records and proxy hosts for `vault.countess-lovelace.duckdns.org` and `seafile.countess-lovelace.duckdns.org`, `DOMAIN` and `SEAFILE_SERVER_HOSTNAME` updated. Retiring the local CA is left:
+  - [x] Pi-hole: the `vault.lan` and `seafile.lan` records were removed (2026-11-22).
+  - [ ] NPM: delete the `vault.lan` and `seafile.lan` proxy hosts and their local CA certificates.
+  - [ ] Remove the local CA from the devices. Keep `/root/ca`: the guide keeps the [local CA](#local-ca-optional-not-in-use) as an option for internal-only services.
 - [ ] **Step 2, external access:** decide whether and how, see the options in [External Access](#external-access). The preferred direction is a VPN (WireGuard or Tailscale), which needs no domain and exposes nothing. Only if a public option (Cloudflare Tunnel or port forwarding) is chosen: decide which services to expose (likely Vaultwarden and Seafile; Pi-hole and the Proxmox panel stay internal), add protection (Cloudflare Access, 2FA) and have working backups first. Cloudflare Tunnel also needs your own domain.
 
 ### Logs
@@ -1684,7 +1729,7 @@ A kernel update only takes effect after a reboot (`uname -r` shows the running o
 - [ ] Implement backups (the manual routine is in [Maintenance](#maintenance-updates)). Nothing is scheduled today. The only backups are manual ones of 100, 101 and 102 taken on 2026-11-17 in `/srv/data/dump` (before the Proxmox upgrade).
   - Note: LXC snapshots (`pct snapshot`) don't work on containers with these bind mounts ("snapshot feature is not available", seen on 100 on 2026-11-18), so vzdump plus a copy of the bind-mounted folders is the way to get a rollback point.
   - Note: Proxmox backups (vzdump) **don't include bind mounts**. Pi-hole's `/etc/pihole` and Vaultwarden's `/data` (in `/srv/data/containers/`) must be backed up separately.
-  - Include the local CA (`/root/ca`, at least `cerebro-ca.key` and `cerebro-ca.crt`). Losing the key means installing a new CA on every device.
+  - Include the local CA (`/root/ca`, at least `cerebro-ca.key` and `cerebro-ca.crt`), kept as an option for internal-only services. Losing the key means installing a new CA on every device that uses it. Also keep NPM's data folder, it holds the DuckDNS token and the certificates.
   - Proxmox backup job for the LXCs (Datacenter > Backup) to data-hdd
   - Retention policy (data-hdd currently keeps all backups forever: `prune-backups keep-all=1`)
   - Copy to a second disk or off-site (data-hdd is on the same server, so it doesn't protect against losing the server)
