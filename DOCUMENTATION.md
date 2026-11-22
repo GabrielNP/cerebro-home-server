@@ -91,8 +91,10 @@ This document describes, in a consolidated manner, all the architecture decision
 - Local records:
   vault.countess-lovelace.duckdns.org -> 192.168.1.13
   seafile.countess-lovelace.duckdns.org -> 192.168.1.13
+  vault.lan -> 192.168.1.13 (fallback, local CA, main computer's browser)
+  seafile.lan -> 192.168.1.13 (fallback, local CA, main computer's browser)
 - Reason: all access goes through the reverse proxy
-- The old `vault.lan` and `seafile.lan` records were removed on 2026-11-22, when the services moved to the public certificate (see [Certificates](#certificates-https)).
+- The `.lan` records were removed and added back on 2026-11-22: the services moved to the public certificate, and `.lan` stayed as a fallback (see [Certificates](#certificates-https)).
 
 ### Reverse Proxy (Nginx Proxy Manager)
 
@@ -100,7 +102,7 @@ This document describes, in a consolidated manner, all the architecture decision
 - Ports: 80/443 (proxy), 81 (admin panel)
 - Responsible for all internal HTTPS
 - Let's Encrypt wildcard certificate (DNS challenge with DuckDNS) for all services, see [Certificates](#certificates-https)
-- The local CA (OpenSSL) used before is kept as an option for internal-only services
+- The local CA (OpenSSL) used before is kept as a fallback (`vault.lan` and `seafile.lan`, browser of the main computer) and as an option for internal-only services
 
 ### External Access
 
@@ -686,13 +688,15 @@ Web interface: `http://192.168.1.11/admin` (also `https://192.168.1.11/admin` wi
     | :---- | :---- | :---- |
     | vault.countess-lovelace.duckdns.org | 192.168.1.13 | Vaultwarden, through NPM |
     | seafile.countess-lovelace.duckdns.org | 192.168.1.13 | Seafile, through NPM |
+    | vault.lan | 192.168.1.13 | Fallback with the local CA (main computer's browser) |
+    | seafile.lan | 192.168.1.13 | Fallback with the local CA (main computer's browser) |
 
     All records point to NPM, never directly to the service.
 
     Or from the container shell:
 
     ```bash
-    pihole-FTL --config dns.hosts '["192.168.1.13 vault.countess-lovelace.duckdns.org","192.168.1.13 seafile.countess-lovelace.duckdns.org"]'
+    pihole-FTL --config dns.hosts '["192.168.1.13 vault.countess-lovelace.duckdns.org","192.168.1.13 seafile.countess-lovelace.duckdns.org","192.168.1.13 vault.lan","192.168.1.13 seafile.lan"]'
     ```
 
 4. Router: make devices use Pi-hole
@@ -913,7 +917,10 @@ Should show the `nginx-proxy-manager` container as `Up`.
 
 ## Certificates (HTTPS)
 
-Two ways to get HTTPS for the services behind NPM. The **public certificate with DuckDNS** is the one in use (since 2026-11-22). The **local CA** was used before, and is kept as an option for services that are only accessed internally.
+Two ways to get HTTPS for the services behind NPM:
+
+- **Public certificate with DuckDNS** (since 2026-11-22): the main way. Works on every device, including the Android apps.
+- **Local CA**: kept as a **fallback**, `vault.lan` and `seafile.lan` in the browser of the main computer only. Also the option for services that are only accessed internally.
 
 ### Public certificate with DuckDNS (in use)
 
@@ -976,11 +983,19 @@ With a real domain (e.g. `vault.mydomain.com`) the procedure is the same, using 
 - Let's Encrypt publishes every certificate in the public Certificate Transparency logs, so the hostnames become visible. A wildcard certificate (`*.mydomain.com`) avoids listing each service.
 - Switching later from DuckDNS to an own domain means repeating the steps above for the new names.
 
-### Local CA (optional, not in use)
+### Local CA (fallback, browser only)
 
-> Used from 2026-11-17 to 2026-11-22 for `vault.lan` and `seafile.lan`. Retired when Vaultwarden and Seafile moved to the public certificate. The CA files stay in `/root/ca` (and in `/srv/data/backups/ca`) in case it's needed again: to access a service only internally, or to go back. Using it again also needs a Pi-hole local record and an NPM proxy host for the `.lan` name, as in the public certificate steps above. The examples below use `vault.lan` from the earlier setup.
+> Used from 2026-11-17 to 2026-11-22 as the main way for `vault.lan` and `seafile.lan`. Since 2026-11-22 the public certificate is the main way, and the local CA is kept as a **fallback** that is used only from the browser of the main computer, which needs the CA installed in its browser or system (step 6 below). It was removed from the phone.
 >
-> Limit: Android apps ignore CAs installed by the user, so apps like Bitwarden and Seafile on Android don't work with it. Browsers do.
+> What is kept for it:
+> - The CA and the service certificates: `/root/ca` (and the CA in `/srv/data/backups/ca`), and the two *Custom* certificates in NPM (`vault.lan (local CA)`, `seafile.lan (local CA)`).
+> - Pi-hole local records `vault.lan` and `seafile.lan` → `192.168.1.13`, next to the DuckDNS ones.
+> - NPM proxy hosts `vault.lan` (→ `http://192.168.1.12:8080`) and `seafile.lan` (→ `http://192.168.1.14:80`), each with its local CA certificate, WebSockets, *Force SSL* and *HTTP/2 Support*.
+>
+> Limits:
+> - Android apps ignore CAs installed by the user, so Bitwarden and Seafile on Android don't work with it. Browsers do.
+> - `DOMAIN` (Vaultwarden) and `SEAFILE_SERVER_HOSTNAME` (Seafile) are set to the DuckDNS names. `.lan` is a second door into the same service: from the host it answers correctly with the local CA (`curl --cacert /root/ca/cerebro-ca.crt https://vault.lan` and `https://seafile.lan/api2/ping/`), but links and emails the services generate use the DuckDNS name. Logging in through `.lan` in the browser works (tested 2026-11-22 on Vaultwarden and Seafile).
+> - Certificates here last 825 days. See [Renewing a certificate](#renewing-a-certificate).
 
 `.lan` is not a public domain, so Let's Encrypt can't issue certificates for it. The local CA is a small Certificate Authority we create ourselves with OpenSSL: one CA, one certificate per service, uploaded to NPM as *Custom* certificates. For every service, follow steps 2 to 5 below (create the certificate, copy it, upload it to NPM, use it in the proxy host) and test it with step 7. Devices that already have the CA installed (step 6) need nothing.
 
@@ -1087,10 +1102,10 @@ The CA lives in `/root/ca` on the host: only root can read it, and no container 
     - **Windows:** double-click the file > *Install Certificate* > *Local Machine* > *Place all certificates in the following store* > *Trusted Root Certification Authorities*
     - **Android:** *Settings* > *Security* > *Encryption & credentials* > *Install a certificate* > *CA certificate*
     - **iPhone/iPad:** open the file to install the profile, then *Settings* > *General* > *About* > *Certificate Trust Settings* > enable it
-    - **Linux:** `cp cerebro-ca.crt /usr/local/share/ca-certificates/ && update-ca-certificates`
+    - **Linux:** `cp cerebro-ca.crt /usr/local/share/ca-certificates/ && update-ca-certificates`. This only covers the system store (`curl`, `wget`). **Chrome on Linux keeps its own database** and ignores it, so also run, as your normal user (not `sudo`): `certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "Cerebro Home Server CA" -i cerebro-ca.crt` (package `libnss3-tools`), check with `certutil -d sql:$HOME/.pki/nssdb -L`, then quit Chrome completely (`pkill -f chrome`). The *Import* button in `chrome://certificate-manager` is for client certificates and asks for a password, it did not work for the CA (2026-11-22)
     - **Firefox** (any OS) uses its own store: *Settings* > *Privacy & Security* > *Certificates* > *View Certificates* > *Authorities* > *Import*
 
-    Restart the browser afterwards.
+    Restart the browser afterwards. If Chrome kept a saved bypass from an earlier warning ("you have chosen to turn off security warnings for this site"), click *Turn on warnings* in the address bar's site information and reload.
 
 7. Test
 
@@ -1714,10 +1729,10 @@ A kernel update only takes effect after a reboot (`uname -r` shows the running o
 
 ### External access and certificates
 
-- [ ] **Step 1, public certificates with DuckDNS** (done on 2026-11-22 for Vaultwarden and Seafile, see [Certificates](#certificates-https)): wildcard certificate `*.countess-lovelace.duckdns.org` in NPM, Pi-hole local records and proxy hosts for `vault.countess-lovelace.duckdns.org` and `seafile.countess-lovelace.duckdns.org`, `DOMAIN` and `SEAFILE_SERVER_HOSTNAME` updated. Retiring the local CA is left:
-  - [x] Pi-hole: the `vault.lan` and `seafile.lan` records were removed (2026-11-22).
-  - [ ] NPM: delete the `vault.lan` and `seafile.lan` proxy hosts and their local CA certificates.
-  - [ ] Remove the local CA from the devices. Keep `/root/ca`: the guide keeps the [local CA](#local-ca-optional-not-in-use) as an option for internal-only services.
+- [x] **Step 1, public certificates with DuckDNS** (done on 2026-11-22 for Vaultwarden and Seafile, see [Certificates](#certificates-https)): wildcard certificate `*.countess-lovelace.duckdns.org` in NPM, Pi-hole local records and proxy hosts for `vault.countess-lovelace.duckdns.org` and `seafile.countess-lovelace.duckdns.org`, `DOMAIN` and `SEAFILE_SERVER_HOSTNAME` updated. The local CA stays as a fallback:
+  - [x] Local CA removed from the phone (2026-11-22).
+  - [x] `.lan` kept as a fallback instead of retired (2026-11-22): Pi-hole records and NPM proxy hosts recreated, local CA certificates kept in NPM and in `/root/ca`, CA to be used only on the main computer (check that it is installed there). See [Local CA](#local-ca-fallback-browser-only).
+  - [x] Seafile and Vaultwarden login through `.lan` in the browser of the main computer (2026-11-22): works, after installing the CA in Chrome's own database, see step 6 of the local CA.
 - [ ] **Step 2, external access:** decide whether and how, see the options in [External Access](#external-access). The preferred direction is a VPN (WireGuard or Tailscale), which needs no domain and exposes nothing. Only if a public option (Cloudflare Tunnel or port forwarding) is chosen: decide which services to expose (likely Vaultwarden and Seafile; Pi-hole and the Proxmox panel stay internal), add protection (Cloudflare Access, 2FA) and have working backups first. Cloudflare Tunnel also needs your own domain.
 
 ### Logs
