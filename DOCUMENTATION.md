@@ -12,7 +12,7 @@
 * |__[IP Addressing](#ip-addressing)
 * |__[DNS (Pi-hole)](#dns-pi-hole)
 * |__[Reverse Proxy (Nginx Proxy Manager)](#reverse-proxy-nginx-proxy-manager)
-* |__[External Access (Cloudflare)](#external-access-cloudflare)
+* |__[External Access](#external-access)
 * |__[Target State (goal)](#target-state-goal)
 * [Hypervisor Proxmox VE](#hypervisor-proxmox-ve)
 * |__[Prerequisites](#prerequisites) / [Dependencies](#dependencies)
@@ -101,9 +101,19 @@ This document describes, in a consolidated manner, all the architecture decision
 - Internal certificates signed by a local CA (OpenSSL), see [Certificates](#certificates-internal-https)
 - Let's Encrypt NOT used for .lan domains
 
-### External Access (Cloudflare)
+### External Access
 
-- Not yet configured. To be done in the future.
+- Not yet configured. First decide whether external access is needed at all, and how.
+- Options:
+
+| Option | Needs a domain | Notes |
+| :---- | :---- | :---- |
+| **VPN** (WireGuard, or Tailscale) | No | Nothing is exposed publicly. The phone joins the home network and uses the services as if at home. The safest option, and a common choice for Vaultwarden and Seafile |
+| **Port forwarding + DuckDNS** | No (DuckDNS is enough) | Services are public. Only works if the ISP gives a public IP (not CGNAT), and the exposure is managed by hand |
+| **Cloudflare Tunnel** | Yes (~$10/year) | Services are public with no open router ports, and it works behind CGNAT. Traffic passes through Cloudflare |
+
+- **Preferred direction: VPN.** Not decided or set up yet. A VPN covers reaching Vaultwarden and Seafile from outside with only the owner's devices. A public option (tunnel or port forwarding) is only needed to share Seafile links with other people or to reach services without a VPN app.
+- Public CA certificates are independent of this choice, see [Alternative for the future](#alternative-for-the-future).
 
 ### Target State (goal)
 
@@ -1028,7 +1038,17 @@ A service certificate lasts 825 days (the CA, 10 years). Before it expires, repe
 
 ### Alternative for the future
 
-When Cloudflare is configured with a real domain (e.g. `vault.mydomain.com`), NPM can get free Let's Encrypt certificates using the *DNS challenge* with a Cloudflare API token, even for services that are only reachable inside the LAN. Then no device needs a CA installed.
+With a real domain (e.g. `vault.mydomain.com`), NPM can get Let's Encrypt certificates using the *DNS challenge*, even for services that are only reachable inside the LAN. Then no device needs a CA installed (this fixes the Android apps that reject the local CA). Nothing is exposed to the internet: the DNS record only exists so the challenge can be validated. This is independent of how (or whether) external access is set up, see [External Access](#external-access).
+
+**What is free and what is not:** the certificate (Let's Encrypt) and a Cloudflare account are free, but **the domain is not**: it costs about $10 a year (Cloudflare Registrar sells them at cost; one bought elsewhere can use Cloudflare's DNS by pointing its nameservers there). The free way is DuckDNS.
+
+| Option | Cost | Names | Notes |
+| :---- | :---- | :---- | :---- |
+| Own domain + Cloudflare | ~$10/year (domain) | `vault.mydomain.com` | Cleaner names and full control. Only required for the certificates if you want your own domain, and required if Cloudflare Tunnel is chosen for external access. API token limited to *Zone → DNS → Edit* |
+| DuckDNS | Free | `vault.yourname.duckdns.org` | NPM supports its DNS challenge. Enough for the certificates and for a VPN or port forwarding setup. Depends on a free third-party service, and can't be used with Cloudflare Tunnel |
+
+- Let's Encrypt publishes every certificate in the public Certificate Transparency logs, so the hostnames become visible. A wildcard certificate (`*.mydomain.com`) avoids listing each service.
+- Pi-hole's local records must point the new names to NPM (`192.168.1.13`), like the `.lan` ones.
 
 ## Vaultwarden
 
@@ -1644,6 +1664,16 @@ A kernel update only takes effect after a reboot (`uname -r` shows the running o
 - [x] Seafile: set up from scratch (2026-11-20). LXC 103 at 192.168.1.14, Seafile 13.0 in Docker, data, database and logs on the HDD, HTTPS at https://seafile.lan with the local CA. See [Seafile](#seafile).
 - [x] ~~Seafile: test the Android sync client and the desktop client with the local CA, and set up the clients' libraries.~~ Dropped (2026-11-22): the Android client will most likely reject the local CA, like the Bitwarden app (see [Certificates](#certificates-internal-https), step 7), so testing it is pointless until the services use a certificate from a public CA. Revisit it together with that change (see [Alternative for the future](#alternative-for-the-future)). The web interface and the desktop clients work with the local CA.
 - [x] Seafile: add it to the update routine in [Maintenance](#maintenance-updates) (2026-11-22): check, back up (`data` + `mysql` with the stack stopped), `docker compose pull` + `up -d` in `/opt/seafile`, and test.
+
+- [ ] Set up Immich (photos): a new LXC (104, next free IP after Seafile's 192.168.1.14 outside the DHCP pool), data and logs on the HDD (`/srv/data/containers/immich/{data,logs}`), behind NPM with HTTPS, following the [new service checklist](#virtualization) (Certificates and Logs sections). Check the RAM first (15.5 GB host, VMs 200 and 201 need ~19 GB), and if it needs machine learning or GPU access, plan the CPU/RAM for it. Add it to the update routine in [Maintenance](#maintenance-updates) and to the backups.
+
+### External access and certificates
+
+- [ ] **Step 1, public CA certificates (do this first):** the certificate is free, but the domain is not. Choose between a domain (~$10/year, managed in Cloudflare, with an API token limited to DNS edit on that zone) or a free DuckDNS subdomain, see the comparison in [Alternative for the future](#alternative-for-the-future). In NPM, request Let's Encrypt certificates with the DNS challenge (a wildcard certificate avoids listing each hostname publicly). Works for LAN-only services, nothing is exposed to the internet. Then:
+  - Change the Pi-hole local records and the NPM proxy hosts from `.lan` to the real domain names.
+  - Remove the local CA from the devices (keep `/root/ca` until everything has moved).
+  - This unblocks the Bitwarden and Seafile Android clients, which reject the local CA. Test both, and the Seafile desktop and Android clients, and set up the libraries (this replaces the dropped Seafile client TODO).
+- [ ] **Step 2, external access:** decide whether and how, see the options in [External Access](#external-access). The preferred direction is a VPN (WireGuard or Tailscale), which needs no domain and exposes nothing. Only if a public option (Cloudflare Tunnel or port forwarding) is chosen: decide which services to expose (likely Vaultwarden and Seafile; Pi-hole and the Proxmox panel stay internal), add protection (Cloudflare Access, 2FA) and have working backups first. Cloudflare Tunnel also needs your own domain.
 
 ### Logs
 
