@@ -1326,8 +1326,6 @@ Notes:
 
 ## Seafile
 
-> Set up from scratch on 2026-11-20 (a previous attempt was removed). Seafile 13.0 (Community Edition) in Docker, behind NPM at https://seafile.lan. SeaDoc, the notification server, Seafile AI and the Caddy frontend are not used.
-
 HTTPS: create the certificate for `seafile.lan` and use it in its proxy host following [Certificates](#certificates-internal-https) (steps 2 to 5), and follow [Logs on the HDD](#virtualization) from the start.
 
 ### Prepare LXC
@@ -1558,7 +1556,7 @@ Updates are done by hand for now, so it's clear what changes. A rough cadence is
 # Host:
 apt update && apt list --upgradable
 
-# Each LXC (100, 101, 102):
+# Each LXC (100, 101, 102, 103):
 pct exec <id> -- bash -c 'apt update && apt list --upgradable'
 
 # Pi-hole's own components (core, web, FTL):
@@ -1574,6 +1572,7 @@ vzdump <id> --storage data-hdd --mode snapshot --compress zstd
 ```
 
 - vzdump **doesn't include bind mounts**, so also copy the service's folder: `cp -a /srv/data/containers/<service>/data /srv/data/backups/<service>-pre-update`
+- Seafile (103): copy **both** `data` and `mysql` (`/srv/data/containers/seafile/{data,mysql}`), with the stack stopped (`pct exec 103 -- bash -c 'cd /opt/seafile && docker compose stop'`), so the files and the database stay consistent. Start it again afterwards with `docker compose up -d`.
 - `pct snapshot` doesn't work on these containers ("snapshot feature is not available"), because of the bind mounts. vzdump plus the folder copy is the rollback point.
 
 ### 3. Update
@@ -1584,10 +1583,12 @@ vzdump <id> --storage data-hdd --mode snapshot --compress zstd
 | Debian packages in an LXC | `pct exec <id> -- bash -c 'apt update && apt full-upgrade -y'` | Restart the container if libc, systemd or openssl changed: `pct reboot <id>` |
 | Pi-hole (core, web, FTL) | `pct exec 100 -- pihole -up` | Test DNS (below) |
 | Vaultwarden / NPM (Docker) | `pct exec <id> -- bash -c 'cd /data && docker compose pull && docker compose up -d'` | Open the web interface |
+| Seafile (Docker) | `pct exec 103 -- bash -c 'cd /opt/seafile && docker compose pull && docker compose up -d'` | Check `docker ps` and open https://seafile.lan |
 
 Notes:
 
 - Both compose files use the `:latest` tag, so `docker compose pull` fetches the newest release. If a new version breaks something, the data is safe on the HDD, but going back means pinning the previous version tag in `docker-compose.yml`.
+- Seafile's images are set in `/opt/seafile/.env`: `seafile-mc:13.0-latest` (only moves within 13.0, so `pull` never jumps to a new major version), `mariadb:10.11` and `redis`. Moving to a new Seafile version (e.g. 14.0) means changing `SEAFILE_IMAGE` and the compose files, following Seafile's upgrade notes: do that on purpose, with a backup, not as part of the routine. Seafile may run database migrations on its first start after an update, so watch `docker compose logs -f seafile` until it is up.
 - Old images pile up on the container disk. Clean them with `docker image prune -f` inside the container.
 - Update **one guest at a time**, and **Pi-hole last or at a quiet time**: while it restarts, no device on the LAN can resolve names.
 
@@ -1601,6 +1602,7 @@ dig +short @192.168.1.11 example.com
 
 - https://vault.lan opens and you can log in
 - NPM's admin page opens (http://192.168.1.13:81) and the proxy hosts still work
+- https://seafile.lan opens and you can log in; `pct exec 103 -- docker ps` shows `seafile` and `seafile-mysql` as `healthy`
 
 ### Host reboot
 
@@ -1640,8 +1642,8 @@ A kernel update only takes effect after a reboot (`uname -r` shows the running o
 - [x] Migrate certificates to the local CA (see [Certificates](#certificates-internal-https)). Required before using the Bitwarden apps or Seafile sync clients.
 - [x] Point the DNS of the containers and the host to Pi-hole (2026-11-20). 101 and 102 use `192.168.1.11` then `1.1.1.1`, Pi-hole (100) uses only `1.1.1.1`, and the host uses `192.168.1.11` then `1.1.1.1` (`pvesh set /nodes/pve/dns ...`). Before, they all used the router (`192.168.1.1`), which doesn't know `.lan` and sometimes times out (NPM logged 273 DNS timeouts since 2026-10-22).
 - [x] Seafile: set up from scratch (2026-11-20). LXC 103 at 192.168.1.14, Seafile 13.0 in Docker, data, database and logs on the HDD, HTTPS at https://seafile.lan with the local CA. See [Seafile](#seafile).
-- [ ] Seafile: test the Android sync client and the desktop client with the local CA, and set up the clients' libraries.
-- [ ] Seafile: add it to the update routine in [Maintenance](#maintenance-updates) (Docker images in `/opt/seafile`, and `docker compose pull` + `up -d`).
+- [x] ~~Seafile: test the Android sync client and the desktop client with the local CA, and set up the clients' libraries.~~ Dropped (2026-11-22): the Android client will most likely reject the local CA, like the Bitwarden app (see [Certificates](#certificates-internal-https), step 7), so testing it is pointless until the services use a certificate from a public CA. Revisit it together with that change (see [Alternative for the future](#alternative-for-the-future)). The web interface and the desktop clients work with the local CA.
+- [x] Seafile: add it to the update routine in [Maintenance](#maintenance-updates) (2026-11-22): check, back up (`data` + `mysql` with the stack stopped), `docker compose pull` + `up -d` in `/opt/seafile`, and test.
 
 ### Logs
 
