@@ -27,6 +27,7 @@
 * [Certificates (HTTPS)](#certificates-https)
 * [Vaultwarden](#vaultwarden)
 * [Seafile](#seafile)
+* [Immich](#immich)
 * [Maintenance (updates)](#maintenance-updates)
 * [Outage (Pi-hole or host down)](#outage-pi-hole-or-host-down)
 * [TODOs](#todos)
@@ -81,6 +82,7 @@ This document describes, in a consolidated manner, all the architecture decision
 - Vaultwarden: 192.168.1.12
 - Nginx Proxy Manager: 192.168.1.13
 - Seafile: 192.168.1.14
+- Immich: 192.168.1.15
 - IPs defined outside the router's DHCP range (pool 192.168.1.64 to 192.168.1.253, 1 hour lease) to avoid conflicts
 
 ### DNS (Pi-hole)
@@ -92,6 +94,7 @@ This document describes, in a consolidated manner, all the architecture decision
 - Local records:
   vault.countess-lovelace.duckdns.org -> 192.168.1.13
   seafile.countess-lovelace.duckdns.org -> 192.168.1.13
+  immich.countess-lovelace.duckdns.org -> 192.168.1.13
   vault.lan -> 192.168.1.13 (fallback, local CA, main computer's browser)
   seafile.lan -> 192.168.1.13 (fallback, local CA, main computer's browser)
 - Reason: all access goes through the reverse proxy
@@ -1660,6 +1663,114 @@ Notes:
 * **Backups:** nothing is scheduled. Back up `/srv/data/containers/seafile/{data,mysql}` (vzdump doesn't include them) together with a vzdump of 103. The database (`mysql`) holds the libraries' metadata, so the two folders must be copied together, taken while Seafile is stopped (`docker compose stop` in `/opt/seafile`) for a consistent copy.
 * **Logs:** the system logs are in `/srv/data/containers/seafile/logs` (the container's `/var/log`), Seafile's own logs in `/srv/data/containers/seafile/data/seafile/logs`, and Docker's logs are capped at 3 × 10MB.
 
+## Immich
+
+HTTPS: use the wildcard certificate in its proxy host (`immich.countess-lovelace.duckdns.org`) following [Certificates](#certificates-https) (*For every service*), and follow [Logs on the HDD](#virtualization) from the start.
+
+### Prepare LXC
+
+1. Create the LXC container (steps 1 to 3 of [virtualization](#virtualization)), or simply run:
+
+    ```bash
+    pct create 104 local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst \
+    --hostname immich \
+    --cores 2 \
+    --memory 4096 \
+    --swap 1024 \
+    --net0 name=eth0,bridge=vmbr0,ip=192.168.1.15/24,gw=192.168.1.1,firewall=1,type=veth \
+    --nameserver "192.168.1.11 1.1.1.1" \
+    --searchdomain lan \
+    --rootfs local-lvm:20 \
+    --unprivileged 1 \
+    --features keyctl=1,nesting=1 \
+    --onboot 1
+    ```
+
+    - 4096MB RAM: Immich runs four Docker containers (server, machine learning, Postgres, Valkey) and the machine learning one is the hungry one. 20GB disk: Docker images (~6GB) and the ML model cache stay on the SSD; photos and the database go to the HDD.
+    - No root password is set: use `pct enter 104` from the host.
+    - **Don't start it yet.** Logs go to the HDD first.
+
+2. Logs on the HDD: follow [Logs on the HDD](#virtualization) with `ID=104; NAME=immich; MP=mp0`.
+
+3. Photo library and database on the HDD
+
+    ```bash
+    # On Proxmox host:
+    mkdir -p /srv/data/containers/immich/{library,postgres}
+    chown 100000:100000 /srv/data/containers/immich/{library,postgres}
+    pct set 104 -mp1 /srv/data/containers/immich/library,mp=/opt/immich-library
+    pct set 104 -mp2 /srv/data/containers/immich/postgres,mp=/opt/immich-postgres
+    ```
+
+    - `library` → uploads and originals, thumbnails, encoded videos. `postgres` → the database (libraries' metadata, faces, albums).
+    - After the first start Postgres changes the owner of its files to its `postgres` user, which the host sees as `100999`. That's expected, don't "fix" it.
+
+4. Check `pct config 104`: `mp0`, `mp1`, `mp2`, `onboot: 1`, `unprivileged: 1`, `features: keyctl=1,nesting=1`, `ip=192.168.1.15/24`.
+
+### Install service
+
+1. `pct start 104`, then inside the container: update and install Docker from Docker's repository with `data-root` `/data/docker` and capped logs, exactly as in [Vaultwarden](#install-service).
+
+2. Download Immich's official compose files (https://docs.immich.app/install/docker-compose)
+
+    ```bash
+    mkdir -p /opt/immich && cd /opt/immich
+    curl -fsSL -o docker-compose.yml https://github.com/immich-app/immich/releases/latest/download/docker-compose.yml
+    curl -fsSL -o .env https://github.com/immich-app/immich/releases/latest/download/example.env
+    chmod 600 .env
+    ```
+
+3. Edit `/opt/immich/.env`
+
+    | Variable | Value | Why |
+    | :---- | :---- | :---- |
+    | `UPLOAD_LOCATION` | `/opt/immich-library` | Photo library, on the HDD (`mp1`) |
+    | `DB_DATA_LOCATION` | `/opt/immich-postgres` | Postgres data, on the HDD (`mp2`). Must be a local disk, not a network share |
+    | `TZ` | `Europe/Lisbon` | The line is commented in the example: add it |
+    | `DB_PASSWORD` | `openssl rand -hex 16` | Only letters and digits. Keep it in Vaultwarden, it's not in this guide |
+
+    - `.env` holds the DB password: never print it. Check the file and the compose without secrets: `docker compose config -q`.
+    - The compose file publishes port `2283`, the one NPM forwards to.
+
+4. Bring up
+
+    ```bash
+    cd /opt/immich && docker compose up -d
+    ```
+
+    - The first start downloads the images (a few minutes). Check: `docker ps` shows `immich_server`, `immich_postgres`, `immich_machine_learning`, `immich_redis` as `healthy`, and `curl http://192.168.1.15:2283/api/server/ping` answers `{"res":"pong"}`.
+    - The containers use `restart: always`/`unless-stopped` and the LXC has `onboot`, so they come back after a reboot.
+    - The admin account is created in the browser on the first visit (*Getting Started*).
+
+### Configure Immich on NPM
+
+*Proxy Hosts* > *Add Proxy Host*: domain `immich.countess-lovelace.duckdns.org`, scheme `http`, `192.168.1.15`, port `2283`, Websockets Support **true**, Block Common Exploits true. SSL tab: the wildcard certificate, Force SSL, HTTP/2.
+
+- Immich uploads large photos and videos: in the proxy host's *Advanced* tab add `client_max_body_size 50000M;` if uploads get rejected (NPM's default limit is 2000MB).
+
+### Configure DNS record in Pi-hole
+
+`immich.countess-lovelace.duckdns.org` → `192.168.1.13` (NPM, not the container), see [DNS (Pi-hole)](#dns-pi-hole).
+
+### Configure Immich
+
+First visit: create the admin account in the browser. Then, in the setup wizard and *Administration → Settings*:
+
+* **Storage Template:** enable it **before uploading anything** (changing it later makes Immich run a migration job that moves every file). Suggested: `{{y}}/{{y}}-{{MM}}-{{dd}}/{{filename}}`. Don't use `{{album}}` (files would move when albums change). Never rename, move or delete files in the library folder by hand: Immich tracks the paths in its database.
+* **Google Cast:** leave it disabled. It makes the browser load Google's Cast SDK, so it contacts Google. The other external features (map tiles, version check, reverse geocoding) also contact outside services: decide them one by one.
+* **Mobile app:** install it, server URL `https://immich.countess-lovelace.duckdns.org`, log in, allow access to all photos, *Backup* tab → select the albums → enable backup (and background backup, Wi-Fi only if wanted; exclude the app from battery optimization). Away from home it needs external access.
+* The machine learning container (faces, smart search, duplicates) runs on CPU and keeps the CPUs busy during the first import; job concurrency can be lowered in *Administration → Jobs*.
+
+### Verify
+
+* `curl http://192.168.1.15:2283/api/server/ping` → `{"res":"pong"}`; after NPM and DNS: https://immich.countess-lovelace.duckdns.org opens without warnings.
+* Create the admin account, upload a photo and check it appears in `/srv/data/containers/immich/library`.
+
+Notes:
+* **Backups:** nothing is scheduled. Back up `/srv/data/containers/immich/{library,postgres}` (vzdump doesn't include them) with the stack stopped (`docker compose stop` in `/opt/immich`), plus a vzdump of 104. Immich also writes its own DB dumps to `library/backups`.
+* **Logs:** system logs in `/srv/data/containers/immich/logs` (the container's `/var/log`); Docker's logs are capped at 3 × 10MB.
+* **Memory:** the host has 15.5GB; with 100-104 running there is room, but VMs 200/201 still can't run beside each other. Check `free -h` before starting one.
+
 ## Maintenance (updates)
 
 Updates are done by hand for now, so it's clear what changes. A rough cadence is once a month, or right away when a security fix is announced. Updates are one of the few things that can break a working service, so always follow the same order: **check → back up → update → test**.
@@ -1670,7 +1781,7 @@ Updates are done by hand for now, so it's clear what changes. A rough cadence is
 # Host:
 apt update && apt list --upgradable
 
-# Each LXC (100, 101, 102, 103):
+# Each LXC (100, 101, 102, 103, 104):
 pct exec <id> -- bash -c 'apt update && apt list --upgradable'
 
 # Pi-hole's own components (core, web, FTL):
@@ -1686,6 +1797,7 @@ vzdump <id> --storage data-hdd --mode snapshot --compress zstd
 ```
 
 - vzdump **doesn't include bind mounts**, so also copy the service's folder: `cp -a /srv/data/containers/<service>/data /srv/data/backups/<service>-pre-update`
+- Immich (104): copy **both** `library` and `postgres` (`/srv/data/containers/immich/{library,postgres}`), with the stack stopped (`pct exec 104 -- bash -c 'cd /opt/immich && docker compose stop'`), then `docker compose up -d`.
 - Seafile (103): copy **both** `data` and `mysql` (`/srv/data/containers/seafile/{data,mysql}`), with the stack stopped (`pct exec 103 -- bash -c 'cd /opt/seafile && docker compose stop'`), so the files and the database stay consistent. Start it again afterwards with `docker compose up -d`.
 - `pct snapshot` doesn't work on these containers ("snapshot feature is not available"), because of the bind mounts. vzdump plus the folder copy is the rollback point.
 
@@ -1697,6 +1809,7 @@ vzdump <id> --storage data-hdd --mode snapshot --compress zstd
 | Debian packages in an LXC | `pct exec <id> -- bash -c 'apt update && apt full-upgrade -y'` | Restart the container if libc, systemd or openssl changed: `pct reboot <id>` |
 | Pi-hole (core, web, FTL) | `pct exec 100 -- pihole -up` | Test DNS (below) |
 | Vaultwarden / NPM (Docker) | `pct exec <id> -- bash -c 'cd /data && docker compose pull && docker compose up -d'` | Open the web interface |
+| Immich (Docker) | `pct exec 104 -- bash -c 'cd /opt/immich && docker compose pull && docker compose up -d'` | Read Immich's release notes first (breaking changes happen); check `docker ps` and open https://immich.countess-lovelace.duckdns.org |
 | Seafile (Docker) | `pct exec 103 -- bash -c 'cd /opt/seafile && docker compose pull && docker compose up -d'` | Check `docker ps` and open https://seafile.countess-lovelace.duckdns.org |
 
 Notes:
@@ -1808,7 +1921,10 @@ The host and the containers have fixed DNS settings, so the router change doesn'
 - [ ] Seafile: test the desktop client with the public certificate and set up the clients' libraries.
 - [x] Seafile: add it to the update routine in [Maintenance](#maintenance-updates) (2026-11-22): check, back up (`data` + `mysql` with the stack stopped), `docker compose pull` + `up -d` in `/opt/seafile`, and test.
 
-- [ ] Set up Immich (photos): a new LXC (104, next free IP after Seafile's 192.168.1.14 outside the DHCP pool), data and logs on the HDD (`/srv/data/containers/immich/{data,logs}`), behind NPM with HTTPS, following the [new service checklist](#virtualization) (Certificates and Logs sections). Check the RAM first (15.5 GB host, VMs 200 and 201 need ~19 GB), and if it needs machine learning or GPU access, plan the CPU/RAM for it. Add it to the update routine in [Maintenance](#maintenance-updates) and to the backups.
+- [x] Immich: LXC 104 at 192.168.1.15 created and running (2026-11-23), Docker + compose, library, database and logs on the HDD. See [Immich](#immich).
+- [x] Immich: NPM proxy host, Pi-hole DNS record, admin account and mobile app backup done and working (2026-11-23), at https://immich.countess-lovelace.duckdns.org.
+- [ ] Immich: add it to the backups. Nothing is backed up yet and the library will hold the only copy of the phone's photos: back up `/srv/data/containers/immich/{library,postgres}` (stack stopped) plus a vzdump of 104, ideally to a second disk.
+- [ ] Immich: back up outside the house needs external access, see [External Access](#external-access).
 
 ### External access and certificates
 
